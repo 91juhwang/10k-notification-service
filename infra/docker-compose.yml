@@ -13,10 +13,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -24,10 +24,10 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 10
 
   localstack:
     image: localstack/localstack:4.2.0
@@ -42,10 +42,10 @@ services:
       - ./localstack-init:/etc/localstack/init/ready.d
       - localstack_data:/var/lib/localstack
     healthcheck:
-      test: ["CMD", "bash", "-c", "awslocal sqs list-queues >/dev/null 2>&1"]
+      test: [ "CMD", "bash", "-c", "awslocal sqs list-queues >/dev/null 2>&1" ]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 10
 
 volumes:
   postgres_data:
