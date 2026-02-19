@@ -1,0 +1,62 @@
+ControlCommandRequest:
+  type: object
+  additionalProperties: false
+  properties:
+    deviceId:
+      type: string
+      minLength: 1
+    commandType:
+      type: string
+      minLength: 1
+    payload:
+      type: object
+      additionalProperties: true
+    idempotencyKey:
+      type: string
+      minLength: 1
+  required: [deviceId, commandType, payload, idempotencyKey]
+
+ControlCommand:
+  type: object
+  properties:
+    id:
+      type: string
+    deviceId:
+      type: string
+    commandType:
+      type: string
+    payload:
+      type: object
+      additionalProperties: true
+    status:
+      type: string
+      enum: [queued, processing, succeeded, failed, cancelled]
+    idempotencyKey:
+      type: string
+    requestedBy:
+      type: string
+      nullable: true
+    createdAt:
+      type: string
+      format: date-time
+    updatedAt:
+      type: string
+      format: date-time
+  required: [id, deviceId, commandType, payload, status, idempotencyKey, createdAt, updatedAt]
+
+ControlCommandAccepted:
+  type: object
+  properties:
+    commandId:
+      type: string
+    status:
+      type: string
+      enum: [queued]
+  required: [commandId, status]
+
+ControlCommandResponse:
+  type: object
+  properties:
+    command:
+      $ref: "#/ControlCommand"
+  required: [command]

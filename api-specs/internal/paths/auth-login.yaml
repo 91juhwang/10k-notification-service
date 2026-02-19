@@ -1,0 +1,22 @@
+post:
+  summary: Login and retrieve JWT
+  operationId: login
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: "../microgrid.openapi.yaml#/components/schemas/LoginRequest"
+  responses:
+    "200":
+      description: Login successful
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/LoginResponse"
+    "401":
+      description: Invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"

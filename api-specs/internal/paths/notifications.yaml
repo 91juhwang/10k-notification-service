@@ -1,0 +1,38 @@
+get:
+  summary: List notifications
+  operationId: listNotifications
+  security:
+    - BearerAuth: []
+  parameters:
+    - name: unreadOnly
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+    - name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    - name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+  responses:
+    "200":
+      description: Notification list
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/NotificationListResponse"
+    "401":
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"

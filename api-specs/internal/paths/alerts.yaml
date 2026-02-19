@@ -1,0 +1,49 @@
+get:
+  summary: List alerts
+  operationId: listAlerts
+  security:
+    - BearerAuth: []
+  parameters:
+    - name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [OPEN, ACKED, RESOLVED]
+    - name: severity
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [LOW, MEDIUM, HIGH, CRITICAL]
+    - name: deviceId
+      in: query
+      required: false
+      schema:
+        type: string
+    - name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    - name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+  responses:
+    "200":
+      description: Alert list
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/AlertListResponse"
+    "401":
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"

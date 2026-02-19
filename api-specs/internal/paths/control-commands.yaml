@@ -1,0 +1,30 @@
+post:
+  summary: Create a control command
+  operationId: createControlCommand
+  security:
+    - BearerAuth: []
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: "../microgrid.openapi.yaml#/components/schemas/ControlCommandRequest"
+  responses:
+    "202":
+      description: Command accepted for asynchronous execution
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ControlCommandAccepted"
+    "401":
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"
+    "409":
+      description: Conflicting idempotency key
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"

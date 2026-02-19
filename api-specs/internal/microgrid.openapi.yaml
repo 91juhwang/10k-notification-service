@@ -1,24 +1,65 @@
 openapi: 3.1.0
 info:
   title: Microgrid API
-  version: 0.0.1
+  version: 0.1.0
 servers:
   - url: http://localhost:4000
+
 paths:
   /health:
-    get:
-      summary: Health check
-      operationId: healthCheck
-      responses:
-        '200':
-          description: Healthy
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  service:
-                    type: string
-                required: [status, service]
+    $ref: ./paths/health.yaml
+  /api/v1/auth/login:
+    $ref: ./paths/auth-login.yaml
+  /api/v1/telemetry:
+    $ref: ./paths/telemetry.yaml
+  /api/v1/alerts:
+    $ref: ./paths/alerts.yaml
+  /api/v1/notifications:
+    $ref: ./paths/notifications.yaml
+  /api/v1/notifications/{id}/ack:
+    $ref: ./paths/notification-ack.yaml
+  /api/v1/control/commands:
+    $ref: ./paths/control-commands.yaml
+  /api/v1/control/commands/{id}:
+    $ref: ./paths/control-command-by-id.yaml
+  /api/v1/stream:
+    $ref: ./paths/stream.yaml
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      $ref: ./components/securitySchemes/api-key.yaml
+    BearerAuth:
+      $ref: ./components/securitySchemes/bearer.yaml
+
+  schemas:
+    ErrorResponse:
+      $ref: ./components/schemas/common.yaml#/ErrorResponse
+    TelemetryIngestRequest:
+      $ref: ./components/schemas/telemetry.yaml#/TelemetryIngestRequest
+    TelemetryIngestAccepted:
+      $ref: ./components/schemas/telemetry.yaml#/TelemetryIngestAccepted
+    Alert:
+      $ref: ./components/schemas/alerts.yaml#/Alert
+    AlertListResponse:
+      $ref: ./components/schemas/alerts.yaml#/AlertListResponse
+    Notification:
+      $ref: ./components/schemas/notifications.yaml#/Notification
+    NotificationListResponse:
+      $ref: ./components/schemas/notifications.yaml#/NotificationListResponse
+    NotificationAckResponse:
+      $ref: ./components/schemas/notifications.yaml#/NotificationAckResponse
+    ControlCommandRequest:
+      $ref: ./components/schemas/control.yaml#/ControlCommandRequest
+    ControlCommand:
+      $ref: ./components/schemas/control.yaml#/ControlCommand
+    ControlCommandAccepted:
+      $ref: ./components/schemas/control.yaml#/ControlCommandAccepted
+    ControlCommandResponse:
+      $ref: ./components/schemas/control.yaml#/ControlCommandResponse
+    LoginRequest:
+      $ref: ./components/schemas/auth.yaml#/LoginRequest
+    LoginResponse:
+      $ref: ./components/schemas/auth.yaml#/LoginResponse
+    StreamEvent:
+      $ref: ./components/schemas/common.yaml#/StreamEvent

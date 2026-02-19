@@ -1,0 +1,27 @@
+ErrorResponse:
+  type: object
+  properties:
+    message:
+      type: string
+    code:
+      type: string
+      nullable: true
+    details:
+      type: object
+      additionalProperties: true
+      nullable: true
+  required: [message]
+
+StreamEvent:
+  type: object
+  properties:
+    eventType:
+      type: string
+      enum: [notification.created, alert.created, control.updated]
+    timestamp:
+      type: string
+      format: date-time
+    data:
+      type: object
+      additionalProperties: true
+  required: [eventType, timestamp, data]

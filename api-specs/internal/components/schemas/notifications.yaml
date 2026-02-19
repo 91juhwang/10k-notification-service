@@ -1,0 +1,45 @@
+Notification:
+  type: object
+  properties:
+    id:
+      type: string
+    alertId:
+      type: string
+      nullable: true
+    type:
+      type: string
+    message:
+      type: string
+    isRead:
+      type: boolean
+    payload:
+      type: object
+      additionalProperties: true
+    createdAt:
+      type: string
+      format: date-time
+  required: [id, type, message, isRead, payload, createdAt]
+
+NotificationListResponse:
+  type: object
+  properties:
+    items:
+      type: array
+      items:
+        $ref: "#/Notification"
+    nextCursor:
+      type: string
+      nullable: true
+  required: [items]
+
+NotificationAckResponse:
+  type: object
+  properties:
+    id:
+      type: string
+    isRead:
+      type: boolean
+    ackedAt:
+      type: string
+      format: date-time
+  required: [id, isRead, ackedAt]

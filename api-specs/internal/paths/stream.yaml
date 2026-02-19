@@ -1,0 +1,19 @@
+get:
+  summary: Subscribe to realtime dashboard events
+  operationId: streamEvents
+  security:
+    - BearerAuth: []
+  responses:
+    "200":
+      description: Event stream opened
+      content:
+        text/event-stream:
+          schema:
+            type: string
+            description: SSE stream where each event payload matches StreamEvent JSON
+    "401":
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"
