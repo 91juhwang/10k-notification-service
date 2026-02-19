@@ -1,0 +1,17 @@
+{
+  "name": "@microgrid/shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"console.log('shared tests pending')\""
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  }
+}

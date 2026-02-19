@@ -1,0 +1,19 @@
+{
+  "name": "@microgrid/db",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "dotenv -e ../../.env -- tsx src/migrate.ts",
+    "generate": "tsx src/generate-migration.ts",
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"console.log('db tests pending')\""
+  },
+  "dependencies": {
+    "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.11"
+  }
+}

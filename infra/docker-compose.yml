@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: microgrid-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: microgrid
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: microgrid-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:4.2.0
+    container_name: microgrid-localstack
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      DEBUG: 1
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./localstack-init:/etc/localstack/init/ready.d
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "bash", "-c", "awslocal sqs list-queues >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres_data:
+  localstack_data:
