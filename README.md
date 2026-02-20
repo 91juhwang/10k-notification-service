@@ -40,6 +40,13 @@ Copy `.env.example` values into your local environment as needed.
 5. Run `pnpm -r run check` before creating a commit.
 6. Update phase status in `NEXT.md` and stop at the current gate for human validation and commit.
 
+## Auth + Realtime Notes
+- API authentication uses bearer tokens from `POST /api/v1/auth/login`.
+- Demo users are configured through env vars: `AUTH_ADMIN_*`, `AUTH_OPERATOR_*`, `AUTH_VIEWER_*`.
+- `/api/v1/alerts`, `/api/v1/notifications`, and `/api/v1/stream` require bearer auth.
+- `/api/v1/notifications/{id}/ack` requires `operator` or `admin` role.
+- Realtime events are published by worker to Redis channel `REDIS_CHANNEL` and streamed by API SSE endpoint.
+
 ## OpenAPI-First Workflow
 1. Update OpenAPI contracts in:
    - root document: `api-specs/internal/microgrid.openapi.yaml`
@@ -72,11 +79,3 @@ Copy `.env.example` values into your local environment as needed.
 3. Validate behavior manually with running services and simulator.
 4. Run checks and update `NEXT.md`.
 5. Stop for human validation and commit at each phase gate.
-
-## Gated Delivery
-Delivery is phased and controlled via `NEXT.md`:
-1. Implement one phase.
-2. Stop at gate.
-3. Human validates.
-4. Human commits.
-5. Continue to next phase.
