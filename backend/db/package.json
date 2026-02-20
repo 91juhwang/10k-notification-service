@@ -2,6 +2,9 @@
   "name": "@microgrid/db",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "migrate": "dotenv -e ../../.env -- tsx src/migrate.ts",
     "generate": "tsx src/generate-migration.ts",
