@@ -5,6 +5,5 @@ coverage/
 .env
 .DS_Store
 *.log
-README.md
 AGENTS.md
 NEXT.md
