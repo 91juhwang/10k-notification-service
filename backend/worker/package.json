@@ -10,6 +10,9 @@
     "test": "node -e \"console.log('worker tests pending')\""
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "^3.994.0",
+    "@microgrid/db": "workspace:^",
+    "@microgrid/shared": "workspace:^",
     "dotenv": "^16.4.7"
   }
 }

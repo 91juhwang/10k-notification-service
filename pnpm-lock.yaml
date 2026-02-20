@@ -73,6 +73,15 @@ importers:
 
   backend/worker:
     dependencies:
+      '@aws-sdk/client-sqs':
+        specifier: ^3.994.0
+        version: 3.994.0
+      '@microgrid/db':
+        specifier: workspace:^
+        version: link:../db
+      '@microgrid/shared':
+        specifier: workspace:^
+        version: link:../../shared
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1
