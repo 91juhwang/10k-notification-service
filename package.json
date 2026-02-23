@@ -6,6 +6,7 @@
     "dev": "concurrently -k -n INFRA,API,WORKER,WEB -c magenta,cyan,yellow,green \"pnpm run dev:infra\" \"pnpm --filter @microgrid/api dev\" \"pnpm --filter @microgrid/worker dev\" \"pnpm --filter @microgrid/web dev\"",
     "dev:infra": "docker compose -f infra/docker-compose.yml up",
     "dev:sim": "pnpm --filter @microgrid/simulator dev",
+    "dev:load": "pnpm --filter @microgrid/simulator load",
     "build": "pnpm -r run build",
     "lint": "pnpm -r run lint",
     "check": "pnpm -r run check",

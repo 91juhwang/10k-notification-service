@@ -25,9 +25,12 @@ Copy `.env.example` values into your local environment as needed.
 - Redis (`localhost:6379`)
 - LocalStack with SQS (`localhost:4566`)
 
+Queue bootstrap script `infra/localstack-init/01-create-queues.sh` creates telemetry/control queues plus DLQs with redrive policy.
+
 ## Core Commands
 - `pnpm run dev`: start infra + API + worker + web.
 - `pnpm run dev:sim`: run the telemetry simulator.
+- `pnpm run dev:load`: run sustained telemetry load test + SLO check.
 - `pnpm run db:migrate`: apply SQL migrations.
 - `pnpm run openapi:generate`: generate shared OpenAPI types.
 - `pnpm run openapi:check`: fail if generated types are stale.
@@ -37,8 +40,9 @@ Copy `.env.example` values into your local environment as needed.
 2. Install dependencies with `pnpm install`.
 3. Start the stack with `pnpm run dev`.
 4. Optionally run telemetry simulation with `pnpm run dev:sim`.
-5. Run `pnpm -r run check` before creating a commit.
-6. Update phase status in `NEXT.md` and stop at the current gate for human validation and commit.
+5. Optionally run sustained load with `pnpm run dev:load`.
+6. Run `pnpm -r run check` before creating a commit.
+7. Update phase status in `NEXT.md` and stop at the current gate for human validation and commit.
 
 ## Auth + Realtime Notes
 - API authentication uses bearer tokens from `POST /api/v1/auth/login`.
@@ -79,3 +83,7 @@ Copy `.env.example` values into your local environment as needed.
 3. Validate behavior manually with running services and simulator.
 4. Run checks and update `NEXT.md`.
 5. Stop for human validation and commit at each phase gate.
+
+## Resilience + SLO Notes
+
+Phase 6 operational details are documented in `docs/phase6-performance-resilience.md`.

@@ -1,4 +1,10 @@
-import { DeleteMessageCommand, ReceiveMessageCommand, SQSClient, type Message } from "@aws-sdk/client-sqs";
+import {
+  DeleteMessageCommand,
+  GetQueueAttributesCommand,
+  ReceiveMessageCommand,
+  SQSClient,
+  type Message
+} from "@aws-sdk/client-sqs";
 import { createPool } from "@microgrid/db";
 import type { components } from "@microgrid/shared";
 import { createClient } from "redis";
@@ -27,8 +33,21 @@ interface WorkerConfig {
   visibilityTimeoutSeconds: number;
   telemetryQueueUrl: string;
   controlQueueUrl: string;
+  telemetryDlqQueueUrl: string | null;
+  controlDlqQueueUrl: string | null;
+  metricsLogIntervalSeconds: number;
   redisUrl: string;
   redisChannel: string;
+}
+
+interface QueueRef {
+  name: string;
+  url: string;
+}
+
+interface QueueDepthSnapshot {
+  visible: number;
+  inFlight: number;
 }
 
 interface NotificationRow {
@@ -74,6 +93,22 @@ interface WorkerDbClient {
   release(): void;
 }
 
+interface WorkerMetrics {
+  startedAtMs: number;
+  telemetryProcessed: number;
+  telemetryDuplicate: number;
+  telemetryMalformed: number;
+  telemetryFailed: number;
+  controlProcessed: number;
+  controlMalformed: number;
+  controlFailed: number;
+  controlMissing: number;
+  controlTerminal: number;
+  telemetryLatencySamplesMs: number[];
+  controlLatencySamplesMs: number[];
+}
+
+const maxLatencySamples = 2000;
 const controlStatuses = new Set<ControlCommandStatus>(["queued", "processing", "succeeded", "failed", "cancelled"]);
 let shuttingDown = false;
 
@@ -100,6 +135,16 @@ function readIntEnv(name: string, fallback: number, { min, max }: { min: number;
   return parsed;
 }
 
+function optionalEnv(name: string): string | null {
+  const value = process.env[name];
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
 function getConfig(): WorkerConfig {
   return {
     pollWaitSeconds: readIntEnv("WORKER_POLL_WAIT_SECONDS", 20, { min: 0, max: 20 }),
@@ -107,6 +152,9 @@ function getConfig(): WorkerConfig {
     visibilityTimeoutSeconds: readIntEnv("WORKER_VISIBILITY_TIMEOUT_SECONDS", 45, { min: 0, max: 43200 }),
     telemetryQueueUrl: requiredEnv("TELEMETRY_QUEUE_URL"),
     controlQueueUrl: requiredEnv("CONTROL_QUEUE_URL"),
+    telemetryDlqQueueUrl: optionalEnv("TELEMETRY_DLQ_URL"),
+    controlDlqQueueUrl: optionalEnv("CONTROL_DLQ_URL"),
+    metricsLogIntervalSeconds: readIntEnv("WORKER_METRICS_LOG_INTERVAL_SECONDS", 30, { min: 5, max: 3600 }),
     redisUrl: requiredEnv("REDIS_URL"),
     redisChannel: process.env.REDIS_CHANNEL ?? "microgrid.events"
   };
@@ -269,6 +317,141 @@ function toControlCommandRecord(row: ControlCommandRow): ControlCommandRecord {
 
 function shouldForceFail(payload: Record<string, unknown>) {
   return payload.forceFail === true;
+}
+
+function createMetrics(): WorkerMetrics {
+  return {
+    startedAtMs: Date.now(),
+    telemetryProcessed: 0,
+    telemetryDuplicate: 0,
+    telemetryMalformed: 0,
+    telemetryFailed: 0,
+    controlProcessed: 0,
+    controlMalformed: 0,
+    controlFailed: 0,
+    controlMissing: 0,
+    controlTerminal: 0,
+    telemetryLatencySamplesMs: [],
+    controlLatencySamplesMs: []
+  };
+}
+
+function toInt(raw: string | undefined) {
+  if (!raw) {
+    return 0;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function pushLatencySample(samples: number[], value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return;
+  }
+
+  if (samples.length >= maxLatencySamples) {
+    samples.shift();
+  }
+
+  samples.push(value);
+}
+
+function recordEndToEndLatency(samples: number[], originIsoTimestamp: string) {
+  const originMs = Date.parse(originIsoTimestamp);
+  if (Number.isNaN(originMs)) {
+    return;
+  }
+
+  pushLatencySample(samples, Date.now() - originMs);
+}
+
+function percentile(samples: number[], ratio: number) {
+  if (samples.length === 0) {
+    return null;
+  }
+
+  const sorted = [...samples].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
+  return sorted[index];
+}
+
+function summarizeLatency(samples: number[]) {
+  if (samples.length === 0) {
+    return null;
+  }
+
+  const sum = samples.reduce((accumulator, value) => accumulator + value, 0);
+  const p50Ms = percentile(samples, 0.5);
+  const p95Ms = percentile(samples, 0.95);
+
+  return {
+    sampleCount: samples.length,
+    avgMs: Number((sum / samples.length).toFixed(2)),
+    p50Ms: p50Ms === null ? null : Number(p50Ms.toFixed(2)),
+    p95Ms: p95Ms === null ? null : Number(p95Ms.toFixed(2))
+  };
+}
+
+async function getQueueDepth(sqsClient: SQSClient, queueUrl: string): Promise<QueueDepthSnapshot> {
+  const result = await sqsClient.send(
+    new GetQueueAttributesCommand({
+      QueueUrl: queueUrl,
+      AttributeNames: ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
+    })
+  );
+
+  return {
+    visible: toInt(result.Attributes?.ApproximateNumberOfMessages),
+    inFlight: toInt(result.Attributes?.ApproximateNumberOfMessagesNotVisible)
+  };
+}
+
+async function getQueueDepths(sqsClient: SQSClient, queueRefs: QueueRef[]) {
+  const snapshots = await Promise.all(
+    queueRefs.map(async (queueRef) => {
+      try {
+        const depth = await getQueueDepth(sqsClient, queueRef.url);
+        return {
+          name: queueRef.name,
+          snapshot: depth
+        };
+      } catch (error) {
+        return {
+          name: queueRef.name,
+          snapshot: {
+            error: error instanceof Error ? error.message : "unknown queue depth error"
+          }
+        };
+      }
+    })
+  );
+
+  return Object.fromEntries(snapshots.map((entry) => [entry.name, entry.snapshot]));
+}
+
+async function logMetricsSnapshot(sqsClient: SQSClient, queueRefs: QueueRef[], metrics: WorkerMetrics) {
+  const queueDepth = await getQueueDepths(sqsClient, queueRefs);
+
+  console.log("[worker] metrics", {
+    uptimeSeconds: Math.floor((Date.now() - metrics.startedAtMs) / 1000),
+    telemetry: {
+      processed: metrics.telemetryProcessed,
+      duplicate: metrics.telemetryDuplicate,
+      malformed: metrics.telemetryMalformed,
+      failed: metrics.telemetryFailed,
+      endToEndLatency: summarizeLatency(metrics.telemetryLatencySamplesMs)
+    },
+    control: {
+      processed: metrics.controlProcessed,
+      malformed: metrics.controlMalformed,
+      failed: metrics.controlFailed,
+      missing: metrics.controlMissing,
+      terminal: metrics.controlTerminal,
+      endToEndLatency: summarizeLatency(metrics.controlLatencySamplesMs)
+    },
+    queues: queueDepth
+  });
 }
 
 async function deleteMessage(sqsClient: SQSClient, queueUrl: string, message: Message) {
@@ -574,25 +757,30 @@ async function processTelemetryMessage(
   pool: WorkerPool,
   queueUrl: string,
   redisChannel: string,
-  message: Message
+  message: Message,
+  metrics: WorkerMetrics
 ) {
   const parsed = parseTelemetryMessageBody(message);
   if (!parsed.ok) {
-    console.warn("[worker] dropping malformed telemetry message", {
+    metrics.telemetryMalformed += 1;
+    console.warn("[worker] malformed telemetry message (will retry until DLQ)", {
       messageId: message.MessageId ?? null,
+      receiveCount: message.Attributes?.ApproximateReceiveCount ?? null,
       reason: parsed.error
     });
-    await deleteMessage(sqsClient, queueUrl, message);
     return;
   }
 
   const persistResult = await persistTelemetry(pool, parsed.value);
+  metrics.telemetryProcessed += 1;
+  recordEndToEndLatency(metrics.telemetryLatencySamplesMs, parsed.value.queuedAt);
 
   if (persistResult.notifications.length > 0) {
     await publishNotificationEvents(redisPublisher, redisChannel, persistResult.notifications);
   }
 
   if (!persistResult.inserted) {
+    metrics.telemetryDuplicate += 1;
     console.info("[worker] duplicate telemetry message ignored", {
       ingestId: parsed.value.ingestId
     });
@@ -607,21 +795,24 @@ async function processControlMessage(
   pool: WorkerPool,
   queueUrl: string,
   redisChannel: string,
-  message: Message
+  message: Message,
+  metrics: WorkerMetrics
 ) {
   const parsed = parseControlMessageBody(message);
   if (!parsed.ok) {
-    console.warn("[worker] dropping malformed control message", {
+    metrics.controlMalformed += 1;
+    console.warn("[worker] malformed control message (will retry until DLQ)", {
       messageId: message.MessageId ?? null,
+      receiveCount: message.Attributes?.ApproximateReceiveCount ?? null,
       reason: parsed.error
     });
-    await deleteMessage(sqsClient, queueUrl, message);
     return;
   }
 
   const lifecycle = await runControlCommandLifecycle(pool, parsed.value);
 
   if (lifecycle.kind === "missing") {
+    metrics.controlMissing += 1;
     console.warn("[worker] control command not found for queue message", {
       commandId: parsed.value.commandId
     });
@@ -630,6 +821,7 @@ async function processControlMessage(
   }
 
   if (lifecycle.kind === "terminal") {
+    metrics.controlTerminal += 1;
     console.info("[worker] control command already in terminal state", {
       commandId: parsed.value.commandId
     });
@@ -637,6 +829,8 @@ async function processControlMessage(
     return;
   }
 
+  metrics.controlProcessed += 1;
+  recordEndToEndLatency(metrics.controlLatencySamplesMs, parsed.value.createdAt);
   await publishControlEvents(redisPublisher, redisChannel, lifecycle.events);
   await deleteMessage(sqsClient, queueUrl, message);
 }
@@ -646,6 +840,17 @@ async function pollLoop() {
   const sqsClient = createSqsClient();
   const redisPublisher = createRedisPublisher(config.redisUrl);
   const pool = createPool();
+  const metrics = createMetrics();
+  const queueRefs: QueueRef[] = [
+    { name: "telemetry", url: config.telemetryQueueUrl },
+    { name: "control", url: config.controlQueueUrl }
+  ];
+  if (config.telemetryDlqQueueUrl) {
+    queueRefs.push({ name: "telemetryDlq", url: config.telemetryDlqQueueUrl });
+  }
+  if (config.controlDlqQueueUrl) {
+    queueRefs.push({ name: "controlDlq", url: config.controlDlqQueueUrl });
+  }
 
   await redisPublisher.connect();
 
@@ -655,12 +860,17 @@ async function pollLoop() {
     visibilityTimeoutSeconds: config.visibilityTimeoutSeconds,
     telemetryQueueUrl: config.telemetryQueueUrl,
     controlQueueUrl: config.controlQueueUrl,
+    telemetryDlqQueueUrl: config.telemetryDlqQueueUrl,
+    controlDlqQueueUrl: config.controlDlqQueueUrl,
+    metricsLogIntervalSeconds: config.metricsLogIntervalSeconds,
     redisChannel: config.redisChannel
   });
 
   const heartbeat = setInterval(() => {
-    console.log("[worker] heartbeat");
-  }, 30000);
+    void logMetricsSnapshot(sqsClient, queueRefs, metrics).catch((error) => {
+      console.error("[worker] failed to capture metrics", error);
+    });
+  }, config.metricsLogIntervalSeconds * 1000);
 
   process.on("SIGINT", () => {
     shuttingDown = true;
@@ -677,7 +887,8 @@ async function pollLoop() {
             QueueUrl: config.telemetryQueueUrl,
             MaxNumberOfMessages: config.batchSize,
             WaitTimeSeconds: config.pollWaitSeconds,
-            VisibilityTimeout: config.visibilityTimeoutSeconds
+            VisibilityTimeout: config.visibilityTimeoutSeconds,
+            MessageSystemAttributeNames: ["ApproximateReceiveCount"]
           })
         ),
         sqsClient.send(
@@ -685,7 +896,8 @@ async function pollLoop() {
             QueueUrl: config.controlQueueUrl,
             MaxNumberOfMessages: config.batchSize,
             WaitTimeSeconds: config.pollWaitSeconds,
-            VisibilityTimeout: config.visibilityTimeoutSeconds
+            VisibilityTimeout: config.visibilityTimeoutSeconds,
+            MessageSystemAttributeNames: ["ApproximateReceiveCount"]
           })
         )
       ]);
@@ -693,44 +905,56 @@ async function pollLoop() {
       const telemetryMessages = telemetryResponse.Messages ?? [];
       const controlMessages = controlResponse.Messages ?? [];
 
-      for (const message of telemetryMessages) {
-        try {
-          await processTelemetryMessage(
-            sqsClient,
-            redisPublisher,
-            pool,
-            config.telemetryQueueUrl,
-            config.redisChannel,
-            message
-          );
-        } catch (error) {
-          console.error("[worker] failed to process telemetry message", {
-            messageId: message.MessageId ?? null,
-            error
-          });
-        }
-      }
-
-      for (const message of controlMessages) {
-        try {
-          await processControlMessage(
-            sqsClient,
-            redisPublisher,
-            pool,
-            config.controlQueueUrl,
-            config.redisChannel,
-            message
-          );
-        } catch (error) {
-          console.error("[worker] failed to process control message", {
-            messageId: message.MessageId ?? null,
-            error
-          });
-        }
-      }
+      await Promise.all([
+        Promise.all(
+          telemetryMessages.map(async (message) => {
+            try {
+              await processTelemetryMessage(
+                sqsClient,
+                redisPublisher,
+                pool,
+                config.telemetryQueueUrl,
+                config.redisChannel,
+                message,
+                metrics
+              );
+            } catch (error) {
+              metrics.telemetryFailed += 1;
+              console.error("[worker] failed to process telemetry message", {
+                messageId: message.MessageId ?? null,
+                error
+              });
+            }
+          })
+        ),
+        Promise.all(
+          controlMessages.map(async (message) => {
+            try {
+              await processControlMessage(
+                sqsClient,
+                redisPublisher,
+                pool,
+                config.controlQueueUrl,
+                config.redisChannel,
+                message,
+                metrics
+              );
+            } catch (error) {
+              metrics.controlFailed += 1;
+              console.error("[worker] failed to process control message", {
+                messageId: message.MessageId ?? null,
+                error
+              });
+            }
+          })
+        )
+      ]);
     }
   } finally {
     clearInterval(heartbeat);
+    await logMetricsSnapshot(sqsClient, queueRefs, metrics).catch((error) => {
+      console.error("[worker] failed to capture final metrics", error);
+    });
     if (redisPublisher.isOpen) {
       await redisPublisher.quit();
     }
