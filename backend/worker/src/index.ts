@@ -31,6 +31,8 @@ interface WorkerConfig {
   pollWaitSeconds: number;
   batchSize: number;
   visibilityTimeoutSeconds: number;
+  queueBootstrapTimeoutSeconds: number;
+  queueBootstrapRetryMs: number;
   telemetryQueueUrl: string;
   controlQueueUrl: string;
   telemetryDlqQueueUrl: string | null;
@@ -150,6 +152,8 @@ function getConfig(): WorkerConfig {
     pollWaitSeconds: readIntEnv("WORKER_POLL_WAIT_SECONDS", 20, { min: 0, max: 20 }),
     batchSize: readIntEnv("WORKER_BATCH_SIZE", 10, { min: 1, max: 10 }),
     visibilityTimeoutSeconds: readIntEnv("WORKER_VISIBILITY_TIMEOUT_SECONDS", 45, { min: 0, max: 43200 }),
+    queueBootstrapTimeoutSeconds: readIntEnv("WORKER_QUEUE_BOOTSTRAP_TIMEOUT_SECONDS", 120, { min: 1, max: 3600 }),
+    queueBootstrapRetryMs: readIntEnv("WORKER_QUEUE_BOOTSTRAP_RETRY_MS", 1000, { min: 100, max: 30000 }),
     telemetryQueueUrl: requiredEnv("TELEMETRY_QUEUE_URL"),
     controlQueueUrl: requiredEnv("CONTROL_QUEUE_URL"),
     telemetryDlqQueueUrl: optionalEnv("TELEMETRY_DLQ_URL"),
@@ -397,6 +401,82 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function toErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "unknown error";
+}
+
+function isQueueDoesNotExistError(error: unknown) {
+  const message = toErrorMessage(error);
+  if (/QueueDoesNotExist|does not exist/i.test(message)) {
+    return true;
+  }
+
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const value = error as {
+    name?: unknown;
+    Code?: unknown;
+    __type?: unknown;
+    Error?: { Code?: unknown; Message?: unknown };
+  };
+
+  const fields = [value.name, value.Code, value.__type, value.Error?.Code, value.Error?.Message];
+  return fields.some((field) => typeof field === "string" && /QueueDoesNotExist|does not exist/i.test(field));
+}
+
+async function waitForQueueAvailability(
+  sqsClient: SQSClient,
+  queueRef: QueueRef,
+  { timeoutMs, retryMs }: { timeoutMs: number; retryMs: number }
+) {
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+
+  while (!shuttingDown) {
+    try {
+      await getQueueDepth(sqsClient, queueRef.url);
+      if (attempts > 0) {
+        console.info("[worker] queue became available", {
+          queueName: queueRef.name,
+          queueUrl: queueRef.url,
+          attempts
+        });
+      }
+      return;
+    } catch (error) {
+      attempts += 1;
+
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Queue "${queueRef.name}" not available after ${Math.round(timeoutMs / 1000)}s: ${toErrorMessage(error)}`
+        );
+      }
+
+      if (attempts === 1 || attempts % 10 === 0) {
+        console.info("[worker] waiting for queue availability", {
+          queueName: queueRef.name,
+          queueUrl: queueRef.url,
+          reason: isQueueDoesNotExistError(error) ? "QueueDoesNotExist" : toErrorMessage(error),
+          attempts,
+          retryMs
+        });
+      }
+
+      await sleep(retryMs);
+    }
+  }
 }
 
 async function getQueueDepth(sqsClient: SQSClient, queueUrl: string): Promise<QueueDepthSnapshot> {
@@ -847,10 +927,11 @@ async function pollLoop() {
   const redisPublisher = createRedisPublisher(config.redisUrl);
   const pool = createPool();
   const metrics = createMetrics();
-  const queueRefs: QueueRef[] = [
+  const requiredQueueRefs: QueueRef[] = [
     { name: "telemetry", url: config.telemetryQueueUrl },
     { name: "control", url: config.controlQueueUrl }
   ];
+  const queueRefs: QueueRef[] = [...requiredQueueRefs];
   if (config.telemetryDlqQueueUrl) {
     queueRefs.push({ name: "telemetryDlq", url: config.telemetryDlqQueueUrl });
   }
@@ -884,6 +965,14 @@ async function pollLoop() {
   process.on("SIGTERM", () => {
     shuttingDown = true;
   });
+
+  const queueBootstrapTimeoutMs = config.queueBootstrapTimeoutSeconds * 1000;
+  for (const queueRef of requiredQueueRefs) {
+    await waitForQueueAvailability(sqsClient, queueRef, {
+      timeoutMs: queueBootstrapTimeoutMs,
+      retryMs: config.queueBootstrapRetryMs
+    });
+  }
 
   try {
     while (!shuttingDown) {

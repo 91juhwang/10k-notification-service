@@ -38,6 +38,11 @@ The load script exits non-zero if SLO checks fail.
 
 Worker logs `[worker] metrics` snapshots every `WORKER_METRICS_LOG_INTERVAL_SECONDS` (default `30`).
 
+Startup queue readiness behavior:
+
+- Worker waits for required queues to exist before polling.
+- Controlled by `WORKER_QUEUE_BOOTSTRAP_TIMEOUT_SECONDS` (default `120`) and `WORKER_QUEUE_BOOTSTRAP_RETRY_MS` (default `1000`).
+
 The snapshot includes:
 
 - Telemetry counters (`processed`, `duplicate`, `malformed`, `failed`)
