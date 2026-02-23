@@ -1,5 +1,62 @@
 # Microgrid Ingestion + Alert + Control Monorepo
 
+## Summary
+- This repo is a full-stack telemetry pipeline for ingesting device readings, generating alerts, and handling control commands.
+- The API accepts writes and reads, the worker handles async queue processing, and the web app shows live operational state.
+- Data durability is in PostgreSQL, realtime fanout is through Redis pub/sub + SSE, and async decoupling is through SQS.
+- It is organized as a monorepo so shared API contracts/types stay consistent across backend and frontend.
+- The `10k` goal is sustained throughput (`10,000 messages/min`), not `10,000` concurrent requests.
+
+## Data Flow (High Level)
+Entry point summary (full cycle):
+- Start stack with `pnpm run dev` (API, worker, web) and traffic with `pnpm run dev:load` (`backend/simulator/src/load-test.ts`).
+- Simulator sends telemetry to API `POST /api/v1/telemetry` (`backend/api/src/server.ts` -> `backend/api/src/app.ts`).
+- API validates payload and enqueues SQS message (fast `202 accepted` response path).
+- Worker (`backend/worker/src/index.ts`) consumes SQS, writes DB rows, and evaluates alert/control lifecycle.
+- Worker publishes realtime events to Redis channel.
+- API SSE endpoint streams those events to connected clients.
+- Web dashboard receives SSE events and updates UI state without refresh.
+
+1. Telemetry ingestion path:
+   `device/simulator -> API (/api/v1/telemetry) -> telemetry SQS queue -> worker -> Postgres (devices + telemetry_readings)`
+2. Alert + notification path:
+   `new telemetry row -> worker evaluates alert_rules -> alerts + notifications tables -> Redis publish -> API SSE stream -> web dashboard`
+3. Control command path:
+   `web/API client -> API (/api/v1/control/commands) -> control SQS queue -> worker lifecycle update (queued -> processing -> succeeded/failed) -> Postgres + Redis publish -> web updates`
+4. Delivery/reliability behavior:
+   - Queues are polled with SQS long polling.
+   - Messages are deleted only after successful handling (or explicit terminal skip for control records).
+   - DLQs receive repeatedly failing messages via redrive policy.
+
+## Fresh Engineer Runbook (Start + Feature Test)
+1. Setup:
+   - Install Node + pnpm.
+   - Copy env values from `.env.example` into your local shell/session.
+2. Install and boot:
+   - `pnpm install`
+   - `pnpm run dev` (starts infra + API + worker + web)
+3. Prepare DB:
+   - In a second terminal, run `pnpm run db:migrate`
+4. Verify basic health:
+   - Open `http://localhost:4000/` and confirm API responds.
+   - Open `http://localhost:5173/` and confirm dashboard loads.
+5. Test telemetry + alerts:
+   - Run `pnpm run dev:sim` to send telemetry.
+   - In the dashboard, log in (use demo credentials from env) and confirm alerts/notifications appear.
+6. Test realtime stream:
+   - Keep the dashboard open while simulator sends data.
+   - Confirm new notifications/updates appear without refreshing.
+7. Test control commands:
+   - Log in as `operator` or `admin`.
+   - Submit a command from the UI control form.
+   - Confirm status transitions through queue lifecycle and settles at succeeded/failed.
+8. Optional sustained load test:
+   - Run `pnpm run dev:load` and review summary/SLO output.
+9. Pre-handoff checks:
+   - `pnpm -r run check`
+   - `pnpm run openapi:check`
+   - `pnpm -r run test`
+
 ## Development Contract
 - OpenAPI-first development is mandatory.
 
@@ -34,15 +91,6 @@ Queue bootstrap script `infra/localstack-init/01-create-queues.sh` creates telem
 - `pnpm run db:migrate`: apply SQL migrations.
 - `pnpm run openapi:generate`: generate shared OpenAPI types.
 - `pnpm run openapi:check`: fail if generated types are stale.
-
-## Runbook
-1. Copy `.env.example` values into your local environment.
-2. Install dependencies with `pnpm install`.
-3. Start the stack with `pnpm run dev`.
-4. Optionally run telemetry simulation with `pnpm run dev:sim`.
-5. Optionally run sustained load with `pnpm run dev:load`.
-6. Run `pnpm -r run check` before creating a commit.
-7. Update phase status in `NEXT.md` and stop at the current gate for human validation and commit.
 
 ## Auth + Realtime Notes
 - API authentication uses bearer tokens from `POST /api/v1/auth/login`.
