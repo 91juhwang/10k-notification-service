@@ -1,0 +1,30 @@
+post:
+  summary: Ingest telemetry batch asynchronously
+  operationId: ingestTelemetryBatch
+  security:
+    - ApiKeyAuth: []
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: "../microgrid.openapi.yaml#/components/schemas/TelemetryBatchIngestRequest"
+  responses:
+    "202":
+      description: Batch accepted for queue processing
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/TelemetryBatchIngestAccepted"
+    "400":
+      description: Invalid payload
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"
+    "401":
+      description: Missing or invalid ingestion API key
+      content:
+        application/json:
+          schema:
+            $ref: "../microgrid.openapi.yaml#/components/schemas/ErrorResponse"
