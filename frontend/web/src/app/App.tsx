@@ -223,6 +223,15 @@ function isPendingStatus(status: ControlCommandRecord["status"]) {
   return status === "queued" || status === "processing";
 }
 
+function formatLocalDateTime(iso: string) {
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) {
+    return iso;
+  }
+
+  return new Date(parsed).toLocaleString();
+}
+
 export function App() {
   const [username, setUsername] = useState("viewer");
   const [password, setPassword] = useState("viewer123");
@@ -557,6 +566,74 @@ export function App() {
     return "Live stream idle";
   }, [streamStatus]);
 
+  const dashboardSnapshot = useMemo(() => {
+    let openAlerts = 0;
+    let criticalOpenAlerts = 0;
+    let highOrCriticalOpenAlerts = 0;
+
+    for (const alert of alerts) {
+      if (alert.status !== "OPEN") {
+        continue;
+      }
+
+      openAlerts += 1;
+
+      if (alert.severity === "CRITICAL") {
+        criticalOpenAlerts += 1;
+      }
+
+      if (alert.severity === "HIGH" || alert.severity === "CRITICAL") {
+        highOrCriticalOpenAlerts += 1;
+      }
+    }
+
+    const unreadNotifications = notifications.filter((notification) => !notification.isRead).length;
+    const pendingCommands = commands.filter((command) => isPendingStatus(command.status)).length;
+    const failedCommands = commands.filter((command) => command.status === "failed").length;
+
+    let latestNotificationAt: string | null = null;
+    let latestNotificationMs = -1;
+    for (const notification of notifications) {
+      const parsed = Date.parse(notification.createdAt);
+      if (Number.isNaN(parsed) || parsed <= latestNotificationMs) {
+        continue;
+      }
+
+      latestNotificationMs = parsed;
+      latestNotificationAt = notification.createdAt;
+    }
+
+    let statusTone: "stable" | "monitoring" | "attention" | "critical" = "stable";
+    let statusLabel = "Stable";
+    let statusReason = "No open critical risks or failed commands in the latest window.";
+
+    if (criticalOpenAlerts > 0) {
+      statusTone = "critical";
+      statusLabel = "Critical Risk";
+      statusReason = "Critical threshold breaches are active and need immediate response.";
+    } else if (highOrCriticalOpenAlerts > 0 || failedCommands > 0) {
+      statusTone = "attention";
+      statusLabel = "Attention Needed";
+      statusReason = "High-severity risk or failed command execution was detected.";
+    } else if (openAlerts > 0 || unreadNotifications > 0 || pendingCommands > 0) {
+      statusTone = "monitoring";
+      statusLabel = "Monitoring";
+      statusReason = "Non-critical activity is present; continue operator review.";
+    }
+
+    return {
+      openAlerts,
+      criticalOpenAlerts,
+      unreadNotifications,
+      pendingCommands,
+      failedCommands,
+      latestNotificationAt,
+      statusTone,
+      statusLabel,
+      statusReason
+    };
+  }, [alerts, notifications, commands]);
+
   return (
     <main className="page">
       <header className="page-header">
@@ -590,6 +667,68 @@ export function App() {
         </section>
       ) : (
         <>
+          <section className="panel">
+            <h2>Operational Purpose</h2>
+            <p className="hint">This dashboard is for operator decisions, not just data display.</p>
+            <ul className="purpose-list">
+              <li>
+                <strong>Protect power quality:</strong> alerts show threshold breaches that can impact grid stability.
+              </li>
+              <li>
+                <strong>Prioritize action queue:</strong> notifications represent items operators should acknowledge/review.
+              </li>
+              <li>
+                <strong>Validate remote control:</strong> command lifecycle confirms whether requested actions succeeded or failed.
+              </li>
+              <li>
+                <strong>Verify reliability at scale:</strong> load traffic should still result in actionable, readable operations data.
+              </li>
+            </ul>
+          </section>
+
+          <section className="panel">
+            <h2>Operational Snapshot</h2>
+            <p className="hint">Business-level state from current alerts, notifications, and command outcomes.</p>
+            <div className="kpi-grid">
+              <article className={`kpi-card kpi-${dashboardSnapshot.statusTone}`}>
+                <span className="kpi-label">Current Risk</span>
+                <strong className="kpi-value">{dashboardSnapshot.statusLabel}</strong>
+                <span className="kpi-note">{dashboardSnapshot.statusReason}</span>
+              </article>
+              <article className="kpi-card">
+                <span className="kpi-label">Open Alerts</span>
+                <strong className="kpi-value">{dashboardSnapshot.openAlerts}</strong>
+                <span className="kpi-note">Threshold violations currently unresolved.</span>
+              </article>
+              <article className="kpi-card">
+                <span className="kpi-label">Critical Open</span>
+                <strong className="kpi-value">{dashboardSnapshot.criticalOpenAlerts}</strong>
+                <span className="kpi-note">Highest-risk alerts requiring immediate review.</span>
+              </article>
+              <article className="kpi-card">
+                <span className="kpi-label">Unread Notifications</span>
+                <strong className="kpi-value">{dashboardSnapshot.unreadNotifications}</strong>
+                <span className="kpi-note">Items that still need operator acknowledgement.</span>
+              </article>
+              <article className="kpi-card">
+                <span className="kpi-label">Pending Commands</span>
+                <strong className="kpi-value">{dashboardSnapshot.pendingCommands}</strong>
+                <span className="kpi-note">Queued or processing control actions.</span>
+              </article>
+              <article className="kpi-card">
+                <span className="kpi-label">Failed Commands</span>
+                <strong className="kpi-value">{dashboardSnapshot.failedCommands}</strong>
+                <span className="kpi-note">Control actions that did not complete successfully.</span>
+              </article>
+            </div>
+            <p className="muted">
+              Latest notification event:{" "}
+              {dashboardSnapshot.latestNotificationAt
+                ? formatLocalDateTime(dashboardSnapshot.latestNotificationAt)
+                : "none received yet"}
+            </p>
+          </section>
+
           <section className="panel toolbar">
             <div>
               <strong>Role:</strong> {session.role}
@@ -613,6 +752,7 @@ export function App() {
 
           <section className="panel">
             <h2>Control Commands</h2>
+            <p className="hint">Use this to issue actions and verify execution lifecycle for each device command.</p>
             {canCreateCommands ? (
               <form className="form" onSubmit={handleCreateControlCommand}>
                 <label>
@@ -664,7 +804,7 @@ export function App() {
                       <div className="muted">Idempotency: {command.idempotencyKey}</div>
                       <div className={`status status-${command.status}`}>Status: {command.status}</div>
                       <div className="muted">
-                        Requested by {command.requestedBy ?? "unknown"} · {new Date(command.updatedAt).toLocaleString()}
+                        Requested by {command.requestedBy ?? "unknown"} · {formatLocalDateTime(command.updatedAt)}
                       </div>
                       {session ? (
                         <button
@@ -683,7 +823,8 @@ export function App() {
           </section>
 
           <section className="panel">
-            <h2>Alerts</h2>
+            <h2>Alerts (Risk Signals)</h2>
+            <p className="hint">Each alert indicates a rule breach that may affect service quality or stability.</p>
             {alertsLoading ? <p className="hint">Loading alerts...</p> : null}
             {alertsError ? <p className="error">{alertsError}</p> : null}
             {!alertsLoading && !alertsError && alerts.length === 0 ? <p className="empty">No alerts yet.</p> : null}
@@ -697,7 +838,7 @@ export function App() {
                     </div>
                     <div className="muted">Device {alert.deviceId}</div>
                     <div>{alert.message}</div>
-                    <div className="muted">{new Date(alert.createdAt).toLocaleString()}</div>
+                    <div className="muted">{formatLocalDateTime(alert.createdAt)}</div>
                   </li>
                 ))}
               </ul>
@@ -705,7 +846,10 @@ export function App() {
           </section>
 
           <section className="panel">
-            <h2>Notifications</h2>
+            <h2>Notifications (Operator Action Queue)</h2>
+            <p className="hint">
+              Notifications are workflow items generated by alerts. Unread entries represent pending operator review.
+            </p>
             {notificationsLoading ? <p className="hint">Loading notifications...</p> : null}
             {notificationsError ? <p className="error">{notificationsError}</p> : null}
             {!notificationsLoading && !notificationsError && notifications.length === 0 ? (
@@ -722,7 +866,7 @@ export function App() {
                         <strong>{notification.type}</strong> · {notification.isRead ? "read" : "unread"}
                       </div>
                       <div>{notification.message}</div>
-                      <div className="muted">{new Date(notification.createdAt).toLocaleString()}</div>
+                      <div className="muted">{formatLocalDateTime(notification.createdAt)}</div>
                       {canAckNotifications ? (
                         <button
                           type="button"

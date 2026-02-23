@@ -53,6 +53,67 @@ textarea {
   font-size: 1.1rem;
 }
 
+.purpose-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  margin: 10px 0 8px;
+}
+
+.kpi-card {
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 4px;
+  background: #fff;
+}
+
+.kpi-card.kpi-stable {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.kpi-card.kpi-monitoring {
+  border-color: #7dd3fc;
+  background: #f0f9ff;
+}
+
+.kpi-card.kpi-attention {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.kpi-card.kpi-critical {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.kpi-label {
+  color: #475569;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+}
+
+.kpi-value {
+  color: #0f172a;
+  font-size: 1.35rem;
+  line-height: 1.15;
+}
+
+.kpi-note {
+  color: #334155;
+  font-size: 0.85rem;
+}
+
 .toolbar {
   display: grid;
   gap: 10px;
