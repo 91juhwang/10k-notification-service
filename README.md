@@ -3,31 +3,42 @@
 ## Purpose
 - **Scenario:** machines continuously send telemetry; this app turns that stream into live operational risk signals.
 - **Business value:** teams can detect issues faster, prioritize response, and track action outcomes in one place.
-- **Engineering result:** sustained ingest target (`10,000 messages/min`) while keeping live dashboard visibility.
+- **Engineering focus:** sustain high ingest while keeping dashboard visibility live (`10,000/min` single-ingest baseline and `100,000/min` batch-ingest stress result).
 
 ## Summary
 - This project models a real operations scenario: machines send telemetry continuously, and the system turns raw readings into actionable risk signals.
-- The API ingests telemetry quickly, SQS buffers traffic, and the worker validates/processes messages before writing durable records to PostgreSQL.
+- The API supports both single-ingest (`/api/v1/telemetry`) and batch-ingest (`/api/v1/telemetry/batch`) paths, SQS buffers traffic, and the worker validates/processes messages before writing durable records to PostgreSQL.
 - When risk conditions are met, alerts and notifications are created and pushed live to the dashboard through Redis + SSE so operators can respond immediately.
 - Operators can also send control commands and track lifecycle outcomes (`queued -> processing -> succeeded/failed`) in the same workflow.
-- The core engineering target is sustained ingest throughput (`10,000 messages/min`), not `10,000` concurrent requests.
+- Throughput is measured as sustained messages per minute, not concurrent requests.
 
 ## What This Already Proved (Local Demo)
 - **The system handled about `50,000` telemetry messages in `5 minutes` with no request failures.**
 - **Why this matters:** the app can process heavy incoming traffic while still supporting operator-facing alerts and notifications.
-- Test run command: `pnpm run dev:load`
-- Load profile: `10,000 messages/min` for `300s`
-- Outcome:
+- Baseline command: `pnpm run dev:load`
+- Baseline profile: `10,000 messages/min` for `300s`
+- Baseline outcome:
   - **attempted:** `49,999`
   - **accepted:** `49,999` (**`100%`**)
   - **request errors (4xx/5xx/network):** **`0 / 0 / 0`**
   - **latency:** `p50 145.09ms`, **`p95 233.62ms`**
   - **SLO check:** **`passed`** (`minSuccessRate=0.99`, `maxP95LatencyMs=1500`)
+- Stress command: `pnpm run dev:load:100k`
+- Stress profile: `100,000 messages/min` for `300s` using `/api/v1/telemetry/batch` (`SIM_LOAD_BATCH_SIZE=100`)
+- Stress outcome (latest local run, February 23, 2026):
+  - **attempted requests:** `5,100`
+  - **accepted requests:** `5,100` (**`100%`**)
+  - **attempted messages:** `500,000`
+  - **accepted messages:** `500,000` (**`100%`**)
+  - **actual accepted throughput:** **`99,999.67/min`**
+  - **request errors (4xx/5xx/network):** **`0 / 0 / 0`**
+  - **latency:** `p50 644.48ms`, **`p95 1,851.7ms`**
+  - **SLO check:** **`failed`** (throughput succeeded; strict latency target `p95 <= 1500ms` missed)
 - Scope note: this is a local benchmark reference (machine + Docker + LocalStack + local Postgres), not a production SLA guarantee.
 
 ## Data Flow (High Level)
 Entry point summary (full cycle):
-- Start stack with `pnpm run dev` (API, worker, web) and traffic with `pnpm run dev:load` (`backend/simulator/src/load-test.ts`).
+- Start stack with `pnpm run dev` (API, worker, web) and traffic with `pnpm run dev:load` (single ingest) or `pnpm run dev:load:100k` (batch ingest) (`backend/simulator/src/load-test.ts`).
 - Simulator sends telemetry to API `POST /api/v1/telemetry` (`backend/api/src/server.ts` -> `backend/api/src/app.ts`).
 - API validates payload and enqueues SQS message (fast `202 accepted` response path).
 - Worker (`backend/worker/src/index.ts`) consumes SQS, writes DB rows, and evaluates alert/control lifecycle.
@@ -36,7 +47,7 @@ Entry point summary (full cycle):
 - Web dashboard receives SSE events and updates UI state without refresh.
 
 1. Telemetry ingestion path:
-   `device/simulator -> API (/api/v1/telemetry) -> telemetry SQS queue -> worker -> Postgres (devices + telemetry_readings)`
+   `device/simulator -> API (/api/v1/telemetry or /api/v1/telemetry/batch) -> telemetry SQS queue -> worker -> Postgres (devices + telemetry_readings)`
 2. Alert + notification path:
    `new telemetry row -> worker evaluates alert_rules -> alerts + notifications tables -> Redis publish -> API SSE stream -> web dashboard`
 3. Control command path:
@@ -69,7 +80,7 @@ Entry point summary (full cycle):
    - Submit a command from the UI control form.
    - Confirm status transitions through queue lifecycle and settles at succeeded/failed.
 8. Optional sustained load test:
-   - Run `pnpm run dev:load` and review summary/SLO output.
+   - Run `pnpm run dev:load` (baseline) or `pnpm run dev:load:100k` (stress profile) and review summary/SLO output.
 9. Pre-handoff checks:
    - `pnpm -r run check`
    - `pnpm run openapi:check`
@@ -106,9 +117,19 @@ Queue bootstrap script `infra/localstack-init/01-create-queues.sh` creates telem
 - `pnpm run dev`: start infra + API + worker + web.
 - `pnpm run dev:sim`: run the telemetry simulator.
 - `pnpm run dev:load`: run sustained telemetry load test + SLO check.
+- `pnpm run dev:load:100k`: run high-throughput batch stress profile (`100,000/min` for `300s`) + SLO check.
 - `pnpm run db:migrate`: apply SQL migrations.
 - `pnpm run openapi:generate`: generate shared OpenAPI types.
 - `pnpm run openapi:check`: fail if generated types are stale.
+
+## Throughput Tuning Knobs (Optional)
+- `TELEMETRY_SQS_BATCH_SIZE`: telemetry batch size per SQS send (`1-10`, default `10`).
+- `TELEMETRY_SQS_BATCH_FLUSH_MS`: max wait before flushing a partial telemetry batch (default `5`).
+- `TELEMETRY_SQS_BATCH_MAX_BUFFER`: max in-memory telemetry buffer before API returns queue backpressure errors (default `20000`).
+- `SIM_LOAD_USE_BATCH`: switch simulator transport to `/api/v1/telemetry/batch` (`true` or `false`).
+- `SIM_LOAD_BATCH_SIZE`: number of telemetry readings per batch request in batch mode (default `50`, max `200`).
+- `SIM_LOAD_MAX_IN_FLIGHT`: max concurrent requests from load simulator.
+- `SIM_LOAD_TIMEOUT_MS`: per-request timeout in load simulator.
 
 ## Auth + Realtime Notes
 - API authentication uses bearer tokens from `POST /api/v1/auth/login`.
@@ -149,7 +170,3 @@ Queue bootstrap script `infra/localstack-init/01-create-queues.sh` creates telem
 3. Validate behavior manually with running services and simulator.
 4. Run checks and update `NEXT.md`.
 5. Stop for human validation and commit at each phase gate.
-
-## Resilience + SLO Notes
-
-Phase 6 operational details are documented in `docs/phase6-performance-resilience.md`.
