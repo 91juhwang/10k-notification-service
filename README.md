@@ -13,6 +13,7 @@
 - Throughput is measured as sustained messages per minute, not concurrent requests.
 
 ## What This Already Proved (Local Demo)
+- **Headline result:** **`100,000 messages/min` batch profile passed SLO** (`100%` accepted, `p95 543.08ms`, `0` errors).
 - **The system handled about `50,000` telemetry messages in `5 minutes` with no request failures.**
 - **Why this matters:** the app can process heavy incoming traffic while still supporting operator-facing alerts and notifications.
 - Baseline command: `pnpm run dev:load`
@@ -29,11 +30,11 @@
   - **attempted requests:** `5,100`
   - **accepted requests:** `5,100` (**`100%`**)
   - **attempted messages:** `500,000`
-  - **accepted messages:** `500,000` (**`100%`**)
-  - **actual accepted throughput:** **`99,999.67/min`**
+  - **accepted messages:** `500,000` (**`100%` success**)
+  - **actual accepted throughput:** **`99,999/min`**
   - **request errors (4xx/5xx/network):** **`0 / 0 / 0`**
-  - **latency:** `p50 644.48ms`, **`p95 1,851.7ms`**
-  - **SLO check:** **`failed`** (throughput succeeded; strict latency target `p95 <= 1500ms` missed)
+  - **latency:** `p50 251.66ms`, **`p95 543.08ms`**
+  - **SLO check:** **`passed`** (`minSuccessRate=0.99`, `maxP95LatencyMs=1500`)
 - Scope note: this is a local benchmark reference (machine + Docker + LocalStack + local Postgres), not a production SLA guarantee.
 
 ## Data Flow (High Level)
@@ -125,7 +126,11 @@ Queue bootstrap script `infra/localstack-init/01-create-queues.sh` creates telem
 ## Throughput Tuning Knobs (Optional)
 - `TELEMETRY_SQS_BATCH_SIZE`: telemetry batch size per SQS send (`1-10`, default `10`).
 - `TELEMETRY_SQS_BATCH_FLUSH_MS`: max wait before flushing a partial telemetry batch (default `5`).
-- `TELEMETRY_SQS_BATCH_MAX_BUFFER`: max in-memory telemetry buffer before API returns queue backpressure errors (default `20000`).
+- `TELEMETRY_SQS_BATCH_MAX_BUFFER`: max in-memory telemetry buffer before enqueue backpressure handling applies (default `20000`).
+- `TELEMETRY_SQS_FLUSH_CONCURRENCY`: concurrent telemetry batch flush workers (default `6`).
+- `TELEMETRY_SQS_BATCH_RETRY_ATTEMPTS`: retry count for failed telemetry SQS batch sends (default `3`).
+- `TELEMETRY_SQS_BATCH_RETRY_BASE_MS`: exponential backoff base delay for telemetry batch retries (default `25`).
+- `TELEMETRY_SQS_BUFFER_WAIT_MS`: max wait for buffer capacity before returning queue-full error (default `200`).
 - `SIM_LOAD_USE_BATCH`: switch simulator transport to `/api/v1/telemetry/batch` (`true` or `false`).
 - `SIM_LOAD_BATCH_SIZE`: number of telemetry readings per batch request in batch mode (default `50`, max `200`).
 - `SIM_LOAD_MAX_IN_FLIGHT`: max concurrent requests from load simulator.
