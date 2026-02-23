@@ -7,6 +7,19 @@
 - It is organized as a monorepo so shared API contracts/types stay consistent across backend and frontend.
 - The `10k` goal is sustained throughput (`10,000 messages/min`), not `10,000` concurrent requests.
 
+## What This Already Proved (Local Demo)
+- **The system handled about `50,000` telemetry messages in `5 minutes` with no request failures.**
+- **Why this matters:** the app can process heavy incoming traffic while still supporting operator-facing alerts and notifications.
+- Test run command: `pnpm run dev:load`
+- Load profile: `10,000 messages/min` for `300s`
+- Outcome:
+  - **attempted:** `49,999`
+  - **accepted:** `49,999` (**`100%`**)
+  - **request errors (4xx/5xx/network):** **`0 / 0 / 0`**
+  - **latency:** `p50 145.09ms`, **`p95 233.62ms`**
+  - **SLO check:** **`passed`** (`minSuccessRate=0.99`, `maxP95LatencyMs=1500`)
+- Scope note: this is a local benchmark reference (machine + Docker + LocalStack + local Postgres), not a production SLA guarantee.
+
 ## Data Flow (High Level)
 Entry point summary (full cycle):
 - Start stack with `pnpm run dev` (API, worker, web) and traffic with `pnpm run dev:load` (`backend/simulator/src/load-test.ts`).
