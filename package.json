@@ -7,6 +7,7 @@
     "dev:infra": "docker compose -f infra/docker-compose.yml up",
     "dev:sim": "pnpm --filter @microgrid/simulator dev",
     "dev:load": "pnpm --filter @microgrid/simulator load",
+    "dev:load:100k": "pnpm --filter @microgrid/simulator load:100k",
     "build": "pnpm -r run build",
     "lint": "pnpm -r run lint",
     "check": "pnpm -r run check",
