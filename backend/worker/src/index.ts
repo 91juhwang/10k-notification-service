@@ -393,6 +393,12 @@ function summarizeLatency(samples: number[]) {
   };
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 async function getQueueDepth(sqsClient: SQSClient, queueUrl: string): Promise<QueueDepthSnapshot> {
   const result = await sqsClient.send(
     new GetQueueAttributesCommand({
@@ -494,14 +500,14 @@ async function persistTelemetry(pool: WorkerPool, payload: TelemetryQueueMessage
       `
         WITH upsert_device AS (
           INSERT INTO devices (external_device_id)
-          VALUES ($1)
+          VALUES ($1::text)
           ON CONFLICT (external_device_id)
           DO UPDATE SET updated_at = now()
           RETURNING id
         ),
         inserted_telemetry AS (
           INSERT INTO telemetry_readings (device_id, ts, voltage, frequency, power_kw, ingest_id)
-          SELECT id, $2::timestamptz, $3::double precision, $4::double precision, $5::double precision, $6
+          SELECT id, $2::timestamptz, $3::double precision, $4::double precision, $5::double precision, $6::text
           FROM upsert_device
           ON CONFLICT (ingest_id) DO NOTHING
           RETURNING id, device_id
@@ -563,16 +569,16 @@ async function persistTelemetry(pool: WorkerPool, payload: TelemetryQueueMessage
           INSERT INTO notifications (alert_id, source_ingest_id, type, message, is_read, payload)
           SELECT
             a.id,
-            $1,
+            $1::text,
             'threshold.alert',
             a.message,
             false,
             jsonb_build_object(
               'alertId', a.id,
               'severity', a.severity,
-              'deviceId', $2,
+              'deviceId', $2::text,
               'telemetryReadingId', a.telemetry_reading_id,
-              'ingestId', $1
+              'ingestId', $1::text
             )
           FROM alerts a
           WHERE a.id = ANY($3::bigint[])
@@ -881,7 +887,7 @@ async function pollLoop() {
 
   try {
     while (!shuttingDown) {
-      const [telemetryResponse, controlResponse] = await Promise.all([
+      const [telemetryResult, controlResult] = await Promise.allSettled([
         sqsClient.send(
           new ReceiveMessageCommand({
             QueueUrl: config.telemetryQueueUrl,
@@ -902,8 +908,29 @@ async function pollLoop() {
         )
       ]);
 
-      const telemetryMessages = telemetryResponse.Messages ?? [];
-      const controlMessages = controlResponse.Messages ?? [];
+      if (telemetryResult.status === "rejected") {
+        console.warn("[worker] failed to poll telemetry queue", {
+          queueUrl: config.telemetryQueueUrl,
+          error: telemetryResult.reason
+        });
+      }
+
+      if (controlResult.status === "rejected") {
+        console.warn("[worker] failed to poll control queue", {
+          queueUrl: config.controlQueueUrl,
+          error: controlResult.reason
+        });
+      }
+
+      const telemetryMessages = telemetryResult.status === "fulfilled" ? telemetryResult.value.Messages ?? [] : [];
+      const controlMessages = controlResult.status === "fulfilled" ? controlResult.value.Messages ?? [] : [];
+
+      if (telemetryMessages.length === 0 && controlMessages.length === 0) {
+        if (telemetryResult.status === "rejected" && controlResult.status === "rejected") {
+          await sleep(1000);
+        }
+        continue;
+      }
 
       await Promise.all([
         Promise.all(
