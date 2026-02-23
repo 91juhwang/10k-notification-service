@@ -12,6 +12,8 @@ paths:
     $ref: ./paths/auth-login.yaml
   /api/v1/telemetry:
     $ref: ./paths/telemetry.yaml
+  /api/v1/telemetry/batch:
+    $ref: ./paths/telemetry-batch.yaml
   /api/v1/alerts:
     $ref: ./paths/alerts.yaml
   /api/v1/notifications:
@@ -39,6 +41,10 @@ components:
       $ref: ./components/schemas/telemetry.yaml#/TelemetryIngestRequest
     TelemetryIngestAccepted:
       $ref: ./components/schemas/telemetry.yaml#/TelemetryIngestAccepted
+    TelemetryBatchIngestRequest:
+      $ref: ./components/schemas/telemetry.yaml#/TelemetryBatchIngestRequest
+    TelemetryBatchIngestAccepted:
+      $ref: ./components/schemas/telemetry.yaml#/TelemetryBatchIngestAccepted
     Alert:
       $ref: ./components/schemas/alerts.yaml#/Alert
     AlertListResponse:
