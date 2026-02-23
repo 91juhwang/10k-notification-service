@@ -54,6 +54,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/telemetry/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ingest telemetry batch asynchronously */
+        post: operations["ingestTelemetryBatch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/alerts": {
         parameters: {
             query?: never;
@@ -181,6 +198,17 @@ export interface components {
             status: "accepted";
             /** Format: date-time */
             queuedAt: string;
+        };
+        TelemetryBatchIngestRequest: {
+            readings: components["schemas"]["TelemetryIngestRequest"][];
+        };
+        TelemetryBatchIngestAccepted: {
+            batchId: string;
+            /** @enum {string} */
+            status: "accepted";
+            /** Format: date-time */
+            queuedAt: string;
+            acceptedCount: number;
         };
         Alert: {
             id: string;
@@ -359,6 +387,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TelemetryIngestAccepted"];
+                };
+            };
+            /** @description Invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing or invalid ingestion API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    ingestTelemetryBatch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TelemetryBatchIngestRequest"];
+            };
+        };
+        responses: {
+            /** @description Batch accepted for queue processing */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TelemetryBatchIngestAccepted"];
                 };
             };
             /** @description Invalid payload */
