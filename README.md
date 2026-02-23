@@ -1,11 +1,16 @@
 # Microgrid Ingestion + Alert + Control Monorepo
 
+## Purpose
+- **Scenario:** machines continuously send telemetry; this app turns that stream into live operational risk signals.
+- **Business value:** teams can detect issues faster, prioritize response, and track action outcomes in one place.
+- **Engineering result:** sustained ingest target (`10,000 messages/min`) while keeping live dashboard visibility.
+
 ## Summary
-- This repo is a full-stack telemetry pipeline for ingesting device readings, generating alerts, and handling control commands.
-- The API accepts writes and reads, the worker handles async queue processing, and the web app shows live operational state.
-- Data durability is in PostgreSQL, realtime fanout is through Redis pub/sub + SSE, and async decoupling is through SQS.
-- It is organized as a monorepo so shared API contracts/types stay consistent across backend and frontend.
-- The `10k` goal is sustained throughput (`10,000 messages/min`), not `10,000` concurrent requests.
+- This project models a real operations scenario: machines send telemetry continuously, and the system turns raw readings into actionable risk signals.
+- The API ingests telemetry quickly, SQS buffers traffic, and the worker validates/processes messages before writing durable records to PostgreSQL.
+- When risk conditions are met, alerts and notifications are created and pushed live to the dashboard through Redis + SSE so operators can respond immediately.
+- Operators can also send control commands and track lifecycle outcomes (`queued -> processing -> succeeded/failed`) in the same workflow.
+- The core engineering target is sustained ingest throughput (`10,000 messages/min`), not `10,000` concurrent requests.
 
 ## What This Already Proved (Local Demo)
 - **The system handled about `50,000` telemetry messages in `5 minutes` with no request failures.**
