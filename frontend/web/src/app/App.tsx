@@ -8,6 +8,10 @@ type NotificationAckResponse = components["schemas"]["NotificationAckResponse"];
 type StreamEvent = components["schemas"]["StreamEvent"];
 type AlertListResponse = components["schemas"]["AlertListResponse"];
 type NotificationListResponse = components["schemas"]["NotificationListResponse"];
+type ControlCommandRequest = components["schemas"]["ControlCommandRequest"];
+type ControlCommandRecord = components["schemas"]["ControlCommand"];
+type ControlCommandAccepted = components["schemas"]["ControlCommandAccepted"];
+type ControlCommandResponse = components["schemas"]["ControlCommandResponse"];
 type UserRole = components["schemas"]["LoginResponse"]["role"];
 
 type StreamStatus = "idle" | "connecting" | "connected" | "error";
@@ -24,6 +28,10 @@ interface ApiErrorBody {
   message?: unknown;
 }
 
+function createIdempotencyKey() {
+  return `cmd-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
 function readApiErrorMessage(value: unknown) {
   if (!value || typeof value !== "object") {
     return null;
@@ -31,6 +39,28 @@ function readApiErrorMessage(value: unknown) {
 
   const body = value as ApiErrorBody;
   return typeof body.message === "string" ? body.message : null;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isControlCommandRecord(value: unknown): value is ControlCommandRecord {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.deviceId === "string" &&
+    typeof value.commandType === "string" &&
+    isObject(value.payload) &&
+    typeof value.status === "string" &&
+    typeof value.idempotencyKey === "string" &&
+    (value.requestedBy === null || typeof value.requestedBy === "string") &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string"
+  );
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -46,27 +76,17 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function isNotificationRecord(value: unknown): value is NotificationRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isObject(value)) {
     return false;
   }
 
-  const payload = value as {
-    id?: unknown;
-    type?: unknown;
-    message?: unknown;
-    isRead?: unknown;
-    payload?: unknown;
-    createdAt?: unknown;
-  };
-
   return (
-    typeof payload.id === "string" &&
-    typeof payload.type === "string" &&
-    typeof payload.message === "string" &&
-    typeof payload.isRead === "boolean" &&
-    typeof payload.payload === "object" &&
-    payload.payload !== null &&
-    typeof payload.createdAt === "string"
+    typeof value.id === "string" &&
+    typeof value.type === "string" &&
+    typeof value.message === "string" &&
+    typeof value.isRead === "boolean" &&
+    isObject(value.payload) &&
+    typeof value.createdAt === "string"
   );
 }
 
@@ -174,6 +194,35 @@ function connectStream(
   };
 }
 
+function upsertControlCommand(current: ControlCommandRecord[], nextCommand: ControlCommandRecord) {
+  const replaced = current.map((command) => (command.id === nextCommand.id ? nextCommand : command));
+  const hasExisting = current.some((command) => command.id === nextCommand.id);
+  const merged = hasExisting ? replaced : [nextCommand, ...current];
+
+  return merged.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+}
+
+function extractControlCommandFromStream(data: unknown): ControlCommandRecord | null {
+  if (!isObject(data)) {
+    return null;
+  }
+
+  const nested = (data as { command?: unknown }).command;
+  if (isControlCommandRecord(nested)) {
+    return nested;
+  }
+
+  if (isControlCommandRecord(data)) {
+    return data;
+  }
+
+  return null;
+}
+
+function isPendingStatus(status: ControlCommandRecord["status"]) {
+  return status === "queued" || status === "processing";
+}
+
 export function App() {
   const [username, setUsername] = useState("viewer");
   const [password, setPassword] = useState("viewer123");
@@ -190,12 +239,48 @@ export function App() {
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsError, setNotificationsError] = useState<string | null>(null);
 
+  const [commands, setCommands] = useState<ControlCommandRecord[]>([]);
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [commandSuccess, setCommandSuccess] = useState<string | null>(null);
+  const [isSubmittingCommand, setIsSubmittingCommand] = useState(false);
+  const [refreshingCommandIds, setRefreshingCommandIds] = useState<string[]>([]);
+
+  const [commandDeviceId, setCommandDeviceId] = useState("device-001");
+  const [commandType, setCommandType] = useState("set_mode");
+  const [commandPayloadText, setCommandPayloadText] = useState('{"mode":"eco"}');
+  const [commandIdempotencyKey, setCommandIdempotencyKey] = useState(createIdempotencyKey());
+
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
   const [streamError, setStreamError] = useState<string | null>(null);
 
   const [ackingIds, setAckingIds] = useState<string[]>([]);
 
   const canAckNotifications = session?.role === "admin" || session?.role === "operator";
+  const canCreateCommands = session?.role === "admin" || session?.role === "operator";
+
+  async function fetchControlCommand(accessToken: string, commandId: string) {
+    const response = await requestJson<ControlCommandResponse>(`/api/v1/control/commands/${commandId}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    return response.command;
+  }
+
+  async function refreshControlCommand(accessToken: string, commandId: string) {
+    setRefreshingCommandIds((current) => (current.includes(commandId) ? current : [...current, commandId]));
+
+    try {
+      const command = await fetchControlCommand(accessToken, commandId);
+      setCommands((current) => upsertControlCommand(current, command));
+      setCommandError(null);
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : "Failed to refresh command status");
+    } finally {
+      setRefreshingCommandIds((current) => current.filter((id) => id !== commandId));
+    }
+  }
 
   async function loadDashboardData(accessToken: string) {
     setAlertsLoading(true);
@@ -270,6 +355,12 @@ export function App() {
     }
 
     await loadDashboardData(session.accessToken);
+
+    await Promise.all(
+      commands.map(async (command) => {
+        await refreshControlCommand(session.accessToken, command.id);
+      })
+    );
   }
 
   async function handleAckNotification(notificationId: string) {
@@ -304,12 +395,66 @@ export function App() {
     }
   }
 
+  async function handleCreateControlCommand(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!session || !canCreateCommands) {
+      return;
+    }
+
+    setCommandError(null);
+    setCommandSuccess(null);
+
+    let payload: ControlCommandRequest["payload"];
+    try {
+      const parsed = JSON.parse(commandPayloadText) as unknown;
+      if (!isObject(parsed)) {
+        throw new Error("Payload JSON must be an object");
+      }
+
+      payload = parsed;
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : "Invalid payload JSON");
+      return;
+    }
+
+    setIsSubmittingCommand(true);
+
+    try {
+      const createResult = await requestJson<ControlCommandAccepted>("/api/v1/control/commands", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          deviceId: commandDeviceId,
+          commandType,
+          payload,
+          idempotencyKey: commandIdempotencyKey
+        } satisfies ControlCommandRequest)
+      });
+
+      const command = await fetchControlCommand(session.accessToken, createResult.commandId);
+      setCommands((current) => upsertControlCommand(current, command));
+      setCommandSuccess(`Command ${createResult.commandId} queued.`);
+      setCommandIdempotencyKey(createIdempotencyKey());
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : "Failed to create control command");
+    } finally {
+      setIsSubmittingCommand(false);
+    }
+  }
+
   function handleLogout() {
     setSession(null);
     setAlerts([]);
     setNotifications([]);
+    setCommands([]);
     setAlertsError(null);
     setNotificationsError(null);
+    setCommandError(null);
+    setCommandSuccess(null);
     setStreamStatus("idle");
     setStreamError(null);
   }
@@ -335,21 +480,26 @@ export function App() {
     const disconnect = connectStream(
       session.accessToken,
       (event) => {
-        if (event.eventType !== "notification.created" || !isNotificationRecord(event.data)) {
-          return;
+        if (event.eventType === "notification.created" && isNotificationRecord(event.data)) {
+          const liveNotification = event.data;
+          setNotifications((current) => {
+            if (current.some((notification) => notification.id === liveNotification.id)) {
+              return current;
+            }
+
+            return [liveNotification, ...current];
+          });
         }
-        const liveNotification = event.data;
+
+        if (event.eventType === "control.updated") {
+          const command = extractControlCommandFromStream(event.data);
+          if (command) {
+            setCommands((current) => upsertControlCommand(current, command));
+          }
+        }
 
         setStreamStatus("connected");
         setStreamError(null);
-
-        setNotifications((current) => {
-          if (current.some((notification) => notification.id === liveNotification.id)) {
-            return current;
-          }
-
-          return [liveNotification, ...current];
-        });
       },
       () => {
         setStreamStatus("connected");
@@ -364,6 +514,34 @@ export function App() {
       disconnect();
     };
   }, [session]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
+    const pendingCommandIds = commands.filter((command) => isPendingStatus(command.status)).map((command) => command.id);
+    if (pendingCommandIds.length === 0) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      void Promise.all(
+        pendingCommandIds.map(async (commandId) => {
+          try {
+            const command = await fetchControlCommand(session.accessToken, commandId);
+            setCommands((current) => upsertControlCommand(current, command));
+          } catch {
+            // Best effort polling; SSE is primary update path.
+          }
+        })
+      );
+    }, 5000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [session, commands]);
 
   const streamLabel = useMemo(() => {
     if (streamStatus === "connected") {
@@ -383,13 +561,13 @@ export function App() {
     <main className="page">
       <header className="page-header">
         <h1>Microgrid Dashboard</h1>
-        <p>Alerts and notifications with authenticated streaming updates.</p>
+        <p>Alerts, notifications, and control command lifecycle updates.</p>
       </header>
 
       {!session ? (
         <section className="panel">
           <h2>Login</h2>
-          <p className="hint">Use seeded credentials from env: admin/admin123, operator/operator123, viewer/viewer123.</p>
+          <p className="hint">Use seeded credentials: admin/admin123, operator/operator123, viewer/viewer123.</p>
           <form className="form" onSubmit={handleLoginSubmit}>
             <label>
               Username
@@ -431,6 +609,77 @@ export function App() {
                 Logout
               </button>
             </div>
+          </section>
+
+          <section className="panel">
+            <h2>Control Commands</h2>
+            {canCreateCommands ? (
+              <form className="form" onSubmit={handleCreateControlCommand}>
+                <label>
+                  Device ID
+                  <input value={commandDeviceId} onChange={(event) => setCommandDeviceId(event.target.value)} />
+                </label>
+                <label>
+                  Command Type
+                  <input value={commandType} onChange={(event) => setCommandType(event.target.value)} />
+                </label>
+                <label>
+                  Idempotency Key
+                  <input
+                    value={commandIdempotencyKey}
+                    onChange={(event) => setCommandIdempotencyKey(event.target.value)}
+                  />
+                </label>
+                <label className="wide">
+                  Payload (JSON object)
+                  <textarea
+                    rows={4}
+                    value={commandPayloadText}
+                    onChange={(event) => setCommandPayloadText(event.target.value)}
+                  />
+                </label>
+                <button type="submit" disabled={isSubmittingCommand}>
+                  {isSubmittingCommand ? "Submitting..." : "Queue Command"}
+                </button>
+              </form>
+            ) : (
+              <p className="hint">Viewer role cannot create control commands.</p>
+            )}
+
+            {commandError ? <p className="error">{commandError}</p> : null}
+            {commandSuccess ? <p className="hint">{commandSuccess}</p> : null}
+
+            {commands.length === 0 ? (
+              <p className="empty">No tracked commands yet.</p>
+            ) : (
+              <ul className="list">
+                {commands.map((command) => {
+                  const isRefreshing = refreshingCommandIds.includes(command.id);
+                  return (
+                    <li key={command.id} className="row">
+                      <div>
+                        <strong>{command.commandType}</strong> on {command.deviceId}
+                      </div>
+                      <div className="muted">Command ID: {command.id}</div>
+                      <div className="muted">Idempotency: {command.idempotencyKey}</div>
+                      <div className={`status status-${command.status}`}>Status: {command.status}</div>
+                      <div className="muted">
+                        Requested by {command.requestedBy ?? "unknown"} · {new Date(command.updatedAt).toLocaleString()}
+                      </div>
+                      {session ? (
+                        <button
+                          type="button"
+                          disabled={isRefreshing}
+                          onClick={() => void refreshControlCommand(session.accessToken, command.id)}
+                        >
+                          {isRefreshing ? "Refreshing..." : "Refresh status"}
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </section>
 
           <section className="panel">
@@ -478,7 +727,7 @@ export function App() {
                         <button
                           type="button"
                           disabled={notification.isRead || isAcking}
-                          onClick={() => handleAckNotification(notification.id)}
+                          onClick={() => void handleAckNotification(notification.id)}
                         >
                           {isAcking ? "Acking..." : "Acknowledge"}
                         </button>

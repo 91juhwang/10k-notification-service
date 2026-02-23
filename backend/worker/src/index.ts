@@ -4,11 +4,19 @@ import type { components } from "@microgrid/shared";
 import { createClient } from "redis";
 
 type TelemetryIngestRequest = components["schemas"]["TelemetryIngestRequest"];
+type ControlCommandRequest = components["schemas"]["ControlCommandRequest"];
 type NotificationRecord = components["schemas"]["Notification"];
+type ControlCommandRecord = components["schemas"]["ControlCommand"];
+type ControlCommandStatus = ControlCommandRecord["status"];
 type StreamEvent = components["schemas"]["StreamEvent"];
 type TelemetryQueueMessage = TelemetryIngestRequest & {
   ingestId: string;
   queuedAt: string;
+};
+type ControlQueueMessage = ControlCommandRequest & {
+  commandId: string;
+  requestedBy: string | null;
+  createdAt: string;
 };
 type WorkerPool = ReturnType<typeof createPool>;
 type RedisPublisher = ReturnType<typeof createClient>;
@@ -18,6 +26,7 @@ interface WorkerConfig {
   batchSize: number;
   visibilityTimeoutSeconds: number;
   telemetryQueueUrl: string;
+  controlQueueUrl: string;
   redisUrl: string;
   redisChannel: string;
 }
@@ -32,9 +41,27 @@ interface NotificationRow {
   created_at: Date | string;
 }
 
+interface ControlCommandRow {
+  id: string;
+  external_device_id: string;
+  command_type: string;
+  payload: unknown;
+  status: string;
+  idempotency_key: string;
+  requested_by: string | null;
+  error_message: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
 interface PersistTelemetryResult {
   inserted: boolean;
   notifications: NotificationRecord[];
+}
+
+interface ControlLifecycleResult {
+  kind: "processed" | "missing" | "terminal";
+  events: ControlCommandRecord[];
 }
 
 interface QueryResult<T> {
@@ -47,6 +74,7 @@ interface WorkerDbClient {
   release(): void;
 }
 
+const controlStatuses = new Set<ControlCommandStatus>(["queued", "processing", "succeeded", "failed", "cancelled"]);
 let shuttingDown = false;
 
 function requiredEnv(name: string): string {
@@ -78,6 +106,7 @@ function getConfig(): WorkerConfig {
     batchSize: readIntEnv("WORKER_BATCH_SIZE", 10, { min: 1, max: 10 }),
     visibilityTimeoutSeconds: readIntEnv("WORKER_VISIBILITY_TIMEOUT_SECONDS", 45, { min: 0, max: 43200 }),
     telemetryQueueUrl: requiredEnv("TELEMETRY_QUEUE_URL"),
+    controlQueueUrl: requiredEnv("CONTROL_QUEUE_URL"),
     redisUrl: requiredEnv("REDIS_URL"),
     redisChannel: process.env.REDIS_CHANNEL ?? "microgrid.events"
   };
@@ -114,6 +143,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isControlCommandStatus(value: unknown): value is ControlCommandStatus {
+  return typeof value === "string" && controlStatuses.has(value as ControlCommandStatus);
+}
+
 function isTelemetryQueueMessage(value: unknown): value is TelemetryQueueMessage {
   if (!isObject(value)) {
     return false;
@@ -137,7 +170,30 @@ function isTelemetryQueueMessage(value: unknown): value is TelemetryQueueMessage
   );
 }
 
-function parseMessageBody(message: Message): { ok: true; value: TelemetryQueueMessage } | { ok: false; error: string } {
+function isControlQueueMessage(value: unknown): value is ControlQueueMessage {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.commandId === "string" &&
+    value.commandId.length > 0 &&
+    typeof value.deviceId === "string" &&
+    value.deviceId.trim().length > 0 &&
+    typeof value.commandType === "string" &&
+    value.commandType.trim().length > 0 &&
+    isObject(value.payload) &&
+    typeof value.idempotencyKey === "string" &&
+    value.idempotencyKey.trim().length > 0 &&
+    typeof value.createdAt === "string" &&
+    !Number.isNaN(Date.parse(value.createdAt)) &&
+    (value.requestedBy === null || typeof value.requestedBy === "string")
+  );
+}
+
+function parseTelemetryMessageBody(
+  message: Message
+): { ok: true; value: TelemetryQueueMessage } | { ok: false; error: string } {
   if (!message.Body) {
     return { ok: false, error: "missing message body" };
   }
@@ -151,6 +207,27 @@ function parseMessageBody(message: Message): { ok: true; value: TelemetryQueueMe
 
   if (!isTelemetryQueueMessage(parsed)) {
     return { ok: false, error: "invalid telemetry payload shape" };
+  }
+
+  return { ok: true, value: parsed };
+}
+
+function parseControlMessageBody(
+  message: Message
+): { ok: true; value: ControlQueueMessage } | { ok: false; error: string } {
+  if (!message.Body) {
+    return { ok: false, error: "missing message body" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message.Body);
+  } catch {
+    return { ok: false, error: "invalid JSON body" };
+  }
+
+  if (!isControlQueueMessage(parsed)) {
+    return { ok: false, error: "invalid control payload shape" };
   }
 
   return { ok: true, value: parsed };
@@ -174,6 +251,24 @@ function toNotificationRecord(row: NotificationRow): NotificationRecord {
     payload: isObject(row.payload) ? row.payload : {},
     createdAt: toIsoTimestamp(row.created_at)
   };
+}
+
+function toControlCommandRecord(row: ControlCommandRow): ControlCommandRecord {
+  return {
+    id: row.id,
+    deviceId: row.external_device_id,
+    commandType: row.command_type,
+    payload: isObject(row.payload) ? row.payload : {},
+    status: row.status as ControlCommandStatus,
+    idempotencyKey: row.idempotency_key,
+    requestedBy: row.requested_by,
+    createdAt: toIsoTimestamp(row.created_at),
+    updatedAt: toIsoTimestamp(row.updated_at)
+  };
+}
+
+function shouldForceFail(payload: Record<string, unknown>) {
+  return payload.forceFail === true;
 }
 
 async function deleteMessage(sqsClient: SQSClient, queueUrl: string, message: Message) {
@@ -319,23 +414,161 @@ async function persistTelemetry(pool: WorkerPool, payload: TelemetryQueueMessage
   }
 }
 
+async function runControlCommandLifecycle(
+  pool: WorkerPool,
+  payload: ControlQueueMessage
+): Promise<ControlLifecycleResult> {
+  const client = (await pool.connect()) as WorkerDbClient;
+
+  try {
+    await client.query("BEGIN");
+
+    const existingResult = await client.query<ControlCommandRow>(
+      `
+        SELECT
+          id,
+          external_device_id,
+          command_type,
+          payload,
+          status,
+          idempotency_key,
+          requested_by,
+          error_message,
+          created_at,
+          updated_at
+        FROM control_commands
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [payload.commandId]
+    );
+
+    const existingRow = existingResult.rows[0];
+    if (!existingRow || !isControlCommandStatus(existingRow.status)) {
+      await client.query("COMMIT");
+      return {
+        kind: "missing",
+        events: []
+      };
+    }
+
+    if (existingRow.status === "succeeded" || existingRow.status === "failed" || existingRow.status === "cancelled") {
+      await client.query("COMMIT");
+      return {
+        kind: "terminal",
+        events: []
+      };
+    }
+
+    const processingResult = await client.query<ControlCommandRow>(
+      `
+        UPDATE control_commands
+        SET status = 'processing',
+            error_message = NULL,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING
+          id,
+          external_device_id,
+          command_type,
+          payload,
+          status,
+          idempotency_key,
+          requested_by,
+          error_message,
+          created_at,
+          updated_at
+      `,
+      [payload.commandId]
+    );
+
+    const processingRow = processingResult.rows[0];
+    if (!processingRow || !isControlCommandStatus(processingRow.status)) {
+      await client.query("ROLLBACK");
+      throw new Error("Failed to transition control command to processing state");
+    }
+
+    const finalStatus: ControlCommandStatus = shouldForceFail(payload.payload) ? "failed" : "succeeded";
+    const errorMessage =
+      finalStatus === "failed" ? "Simulated command failure (set payload.forceFail=true to trigger)" : null;
+
+    const finalResult = await client.query<ControlCommandRow>(
+      `
+        UPDATE control_commands
+        SET status = $2,
+            error_message = $3,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING
+          id,
+          external_device_id,
+          command_type,
+          payload,
+          status,
+          idempotency_key,
+          requested_by,
+          error_message,
+          created_at,
+          updated_at
+      `,
+      [payload.commandId, finalStatus, errorMessage]
+    );
+
+    const finalRow = finalResult.rows[0];
+    if (!finalRow || !isControlCommandStatus(finalRow.status)) {
+      await client.query("ROLLBACK");
+      throw new Error("Failed to finalize control command status");
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      kind: "processed",
+      events: [toControlCommandRecord(processingRow), toControlCommandRecord(finalRow)]
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function publishStreamEvent(redisPublisher: RedisPublisher, redisChannel: string, event: StreamEvent) {
+  await redisPublisher.publish(redisChannel, JSON.stringify(event));
+}
+
 async function publishNotificationEvents(
   redisPublisher: RedisPublisher,
   redisChannel: string,
   notifications: NotificationRecord[]
 ) {
   for (const notification of notifications) {
-    const event: StreamEvent = {
+    await publishStreamEvent(redisPublisher, redisChannel, {
       eventType: "notification.created",
       timestamp: new Date().toISOString(),
       data: notification
-    };
-
-    await redisPublisher.publish(redisChannel, JSON.stringify(event));
+    });
   }
 }
 
-async function processMessage(
+async function publishControlEvents(
+  redisPublisher: RedisPublisher,
+  redisChannel: string,
+  controlEvents: ControlCommandRecord[]
+) {
+  for (const command of controlEvents) {
+    await publishStreamEvent(redisPublisher, redisChannel, {
+      eventType: "control.updated",
+      timestamp: new Date().toISOString(),
+      data: {
+        command
+      }
+    });
+  }
+}
+
+async function processTelemetryMessage(
   sqsClient: SQSClient,
   redisPublisher: RedisPublisher,
   pool: WorkerPool,
@@ -343,7 +576,7 @@ async function processMessage(
   redisChannel: string,
   message: Message
 ) {
-  const parsed = parseMessageBody(message);
+  const parsed = parseTelemetryMessageBody(message);
   if (!parsed.ok) {
     console.warn("[worker] dropping malformed telemetry message", {
       messageId: message.MessageId ?? null,
@@ -368,6 +601,46 @@ async function processMessage(
   await deleteMessage(sqsClient, queueUrl, message);
 }
 
+async function processControlMessage(
+  sqsClient: SQSClient,
+  redisPublisher: RedisPublisher,
+  pool: WorkerPool,
+  queueUrl: string,
+  redisChannel: string,
+  message: Message
+) {
+  const parsed = parseControlMessageBody(message);
+  if (!parsed.ok) {
+    console.warn("[worker] dropping malformed control message", {
+      messageId: message.MessageId ?? null,
+      reason: parsed.error
+    });
+    await deleteMessage(sqsClient, queueUrl, message);
+    return;
+  }
+
+  const lifecycle = await runControlCommandLifecycle(pool, parsed.value);
+
+  if (lifecycle.kind === "missing") {
+    console.warn("[worker] control command not found for queue message", {
+      commandId: parsed.value.commandId
+    });
+    await deleteMessage(sqsClient, queueUrl, message);
+    return;
+  }
+
+  if (lifecycle.kind === "terminal") {
+    console.info("[worker] control command already in terminal state", {
+      commandId: parsed.value.commandId
+    });
+    await deleteMessage(sqsClient, queueUrl, message);
+    return;
+  }
+
+  await publishControlEvents(redisPublisher, redisChannel, lifecycle.events);
+  await deleteMessage(sqsClient, queueUrl, message);
+}
+
 async function pollLoop() {
   const config = getConfig();
   const sqsClient = createSqsClient();
@@ -376,10 +649,12 @@ async function pollLoop() {
 
   await redisPublisher.connect();
 
-  console.log("[worker] telemetry worker started", {
+  console.log("[worker] worker started", {
     pollWaitSeconds: config.pollWaitSeconds,
     batchSize: config.batchSize,
     visibilityTimeoutSeconds: config.visibilityTimeoutSeconds,
+    telemetryQueueUrl: config.telemetryQueueUrl,
+    controlQueueUrl: config.controlQueueUrl,
     redisChannel: config.redisChannel
   });
 
@@ -396,23 +671,31 @@ async function pollLoop() {
 
   try {
     while (!shuttingDown) {
-      const response = await sqsClient.send(
-        new ReceiveMessageCommand({
-          QueueUrl: config.telemetryQueueUrl,
-          MaxNumberOfMessages: config.batchSize,
-          WaitTimeSeconds: config.pollWaitSeconds,
-          VisibilityTimeout: config.visibilityTimeoutSeconds
-        })
-      );
+      const [telemetryResponse, controlResponse] = await Promise.all([
+        sqsClient.send(
+          new ReceiveMessageCommand({
+            QueueUrl: config.telemetryQueueUrl,
+            MaxNumberOfMessages: config.batchSize,
+            WaitTimeSeconds: config.pollWaitSeconds,
+            VisibilityTimeout: config.visibilityTimeoutSeconds
+          })
+        ),
+        sqsClient.send(
+          new ReceiveMessageCommand({
+            QueueUrl: config.controlQueueUrl,
+            MaxNumberOfMessages: config.batchSize,
+            WaitTimeSeconds: config.pollWaitSeconds,
+            VisibilityTimeout: config.visibilityTimeoutSeconds
+          })
+        )
+      ]);
 
-      const messages = response.Messages ?? [];
-      if (messages.length === 0) {
-        continue;
-      }
+      const telemetryMessages = telemetryResponse.Messages ?? [];
+      const controlMessages = controlResponse.Messages ?? [];
 
-      for (const message of messages) {
+      for (const message of telemetryMessages) {
         try {
-          await processMessage(
+          await processTelemetryMessage(
             sqsClient,
             redisPublisher,
             pool,
@@ -422,6 +705,24 @@ async function pollLoop() {
           );
         } catch (error) {
           console.error("[worker] failed to process telemetry message", {
+            messageId: message.MessageId ?? null,
+            error
+          });
+        }
+      }
+
+      for (const message of controlMessages) {
+        try {
+          await processControlMessage(
+            sqsClient,
+            redisPublisher,
+            pool,
+            config.controlQueueUrl,
+            config.redisChannel,
+            message
+          );
+        } catch (error) {
+          console.error("[worker] failed to process control message", {
             messageId: message.MessageId ?? null,
             error
           });

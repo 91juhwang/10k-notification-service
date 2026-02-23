@@ -14,7 +14,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -112,6 +113,18 @@ input {
   background: #fff;
 }
 
+textarea {
+  border: 1px solid #94a3b8;
+  border-radius: 8px;
+  padding: 9px 10px;
+  resize: vertical;
+  background: #fff;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
 button {
   border: 1px solid #0284c7;
   border-radius: 8px;
@@ -172,6 +185,30 @@ button.ghost {
 
 .row.severity-low {
   border-left: 6px solid #0284c7;
+}
+
+.status {
+  font-weight: 600;
+}
+
+.status.status-queued {
+  color: #7c3aed;
+}
+
+.status.status-processing {
+  color: #0369a1;
+}
+
+.status.status-succeeded {
+  color: #0f766e;
+}
+
+.status.status-failed {
+  color: #b91c1c;
+}
+
+.status.status-cancelled {
+  color: #64748b;
 }
 
 .hint,

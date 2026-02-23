@@ -2,10 +2,17 @@ import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import type { components } from "@microgrid/shared";
 
 type TelemetryIngestRequest = components["schemas"]["TelemetryIngestRequest"];
+type ControlCommandRequest = components["schemas"]["ControlCommandRequest"];
 
 export interface TelemetryQueueMessage extends TelemetryIngestRequest {
   ingestId: string;
   queuedAt: string;
+}
+
+export interface ControlCommandQueueMessage extends ControlCommandRequest {
+  commandId: string;
+  requestedBy: string | null;
+  createdAt: string;
 }
 
 function requiredEnv(name: string) {
@@ -45,6 +52,24 @@ export async function enqueueTelemetryMessage(message: TelemetryQueueMessage) {
     new SendMessageCommand({
       QueueUrl: queueUrl,
       MessageBody: JSON.stringify(message)
+    })
+  );
+
+  return {
+    queueMessageId: result.MessageId ?? null
+  };
+}
+
+export async function enqueueControlCommandMessage(message: ControlCommandQueueMessage) {
+  const queueUrl = requiredEnv("CONTROL_QUEUE_URL");
+  const isFifoQueue = queueUrl.endsWith(".fifo");
+
+  const result = await sqsClient.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(message),
+      MessageGroupId: isFifoQueue ? message.deviceId : undefined,
+      MessageDeduplicationId: isFifoQueue ? message.idempotencyKey : undefined
     })
   );
 

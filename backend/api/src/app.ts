@@ -6,9 +6,15 @@ import type { components } from "@microgrid/shared";
 import { getAuthContext, requireBearerAuth, requireRoles } from "./middleware/bearer-auth.js";
 import { requireIngestApiKey } from "./middleware/api-key.js";
 import { authenticateUser, issueLoginToken } from "./services/auth-service.js";
+import {
+  createQueuedControlCommand,
+  deleteControlCommandById,
+  getControlCommandById,
+  validateControlCommandPayload
+} from "./services/control-command-service.js";
 import { ackNotification, listAlerts, listNotifications } from "./services/dashboard-repository.js";
 import { getRedisEventHub } from "./services/redis-event-hub.js";
-import { enqueueTelemetryMessage } from "./services/sqs-producer.js";
+import { enqueueControlCommandMessage, enqueueTelemetryMessage } from "./services/sqs-producer.js";
 import { validateTelemetryPayload } from "./services/telemetry-validator.js";
 
 type AlertRecord = components["schemas"]["Alert"];
@@ -97,8 +103,8 @@ export function createApp(): Express {
   app.get("/", (_req, res) => {
     res.json({
       name: "microgrid-api",
-      phase: 4,
-      message: "Auth, list APIs, and realtime stream are enabled."
+      phase: 5,
+      message: "Control command workflow is being processed asynchronously."
     });
   });
 
@@ -212,6 +218,81 @@ export function createApp(): Express {
     } catch (error) {
       console.error("[api] failed to acknowledge notification", error);
       res.status(503).json({ message: "Notification ack unavailable" });
+    }
+  });
+
+  app.post("/api/v1/control/commands", requireBearerAuth, requireRoles(["operator", "admin"]), async (req, res) => {
+    const authContext = getAuthContext(res);
+    if (!authContext) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    const validationResult = validateControlCommandPayload(req.body);
+    if (!validationResult.success) {
+      res.status(400).json({
+        message: "Invalid control command payload",
+        details: validationResult.errors
+      });
+      return;
+    }
+
+    const commandId = randomUUID();
+
+    try {
+      const createResult = await createQueuedControlCommand({
+        commandId,
+        requestedBy: authContext.username,
+        ...validationResult.data
+      });
+
+      if (!createResult.created) {
+        res.status(409).json({ message: "Conflicting idempotency key" });
+        return;
+      }
+
+      try {
+        await enqueueControlCommandMessage({
+          commandId,
+          requestedBy: authContext.username,
+          createdAt: createResult.command.createdAt,
+          ...validationResult.data
+        });
+      } catch (error) {
+        await deleteControlCommandById(commandId);
+        console.error("[api] failed to enqueue control command", error);
+        res.status(503).json({ message: "Control command queue unavailable" });
+        return;
+      }
+
+      res.status(202).json({
+        commandId,
+        status: "queued"
+      });
+    } catch (error) {
+      console.error("[api] failed to create control command", error);
+      res.status(503).json({ message: "Control command unavailable" });
+    }
+  });
+
+  app.get("/api/v1/control/commands/:id", requireBearerAuth, async (req, res) => {
+    const commandId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (!commandId) {
+      res.status(404).json({ message: "Command not found" });
+      return;
+    }
+
+    try {
+      const command = await getControlCommandById(commandId);
+      if (!command) {
+        res.status(404).json({ message: "Command not found" });
+        return;
+      }
+
+      res.json({ command });
+    } catch (error) {
+      console.error("[api] failed to fetch control command", error);
+      res.status(503).json({ message: "Control command unavailable" });
     }
   });
 
