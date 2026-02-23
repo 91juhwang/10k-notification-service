@@ -974,10 +974,11 @@ async function pollLoop() {
     });
   }
 
-  try {
+  const pollTelemetryQueue = async () => {
     while (!shuttingDown) {
-      const [telemetryResult, controlResult] = await Promise.allSettled([
-        sqsClient.send(
+      let telemetryResponse: { Messages?: Message[] };
+      try {
+        telemetryResponse = await sqsClient.send(
           new ReceiveMessageCommand({
             QueueUrl: config.telemetryQueueUrl,
             MaxNumberOfMessages: config.batchSize,
@@ -985,8 +986,50 @@ async function pollLoop() {
             VisibilityTimeout: config.visibilityTimeoutSeconds,
             MessageSystemAttributeNames: ["ApproximateReceiveCount"]
           })
-        ),
-        sqsClient.send(
+        );
+      } catch (error) {
+        console.warn("[worker] failed to poll telemetry queue", {
+          queueUrl: config.telemetryQueueUrl,
+          error
+        });
+        await sleep(1000);
+        continue;
+      }
+
+      const telemetryMessages = telemetryResponse.Messages ?? [];
+      if (telemetryMessages.length === 0) {
+        continue;
+      }
+
+      await Promise.all(
+        telemetryMessages.map(async (message) => {
+          try {
+            await processTelemetryMessage(
+              sqsClient,
+              redisPublisher,
+              pool,
+              config.telemetryQueueUrl,
+              config.redisChannel,
+              message,
+              metrics
+            );
+          } catch (error) {
+            metrics.telemetryFailed += 1;
+            console.error("[worker] failed to process telemetry message", {
+              messageId: message.MessageId ?? null,
+              error
+            });
+          }
+        })
+      );
+    }
+  };
+
+  const pollControlQueue = async () => {
+    while (!shuttingDown) {
+      let controlResponse: { Messages?: Message[] };
+      try {
+        controlResponse = await sqsClient.send(
           new ReceiveMessageCommand({
             QueueUrl: config.controlQueueUrl,
             MaxNumberOfMessages: config.batchSize,
@@ -994,78 +1037,47 @@ async function pollLoop() {
             VisibilityTimeout: config.visibilityTimeoutSeconds,
             MessageSystemAttributeNames: ["ApproximateReceiveCount"]
           })
-        )
-      ]);
-
-      if (telemetryResult.status === "rejected") {
-        console.warn("[worker] failed to poll telemetry queue", {
-          queueUrl: config.telemetryQueueUrl,
-          error: telemetryResult.reason
-        });
-      }
-
-      if (controlResult.status === "rejected") {
+        );
+      } catch (error) {
         console.warn("[worker] failed to poll control queue", {
           queueUrl: config.controlQueueUrl,
-          error: controlResult.reason
+          error
         });
-      }
-
-      const telemetryMessages = telemetryResult.status === "fulfilled" ? telemetryResult.value.Messages ?? [] : [];
-      const controlMessages = controlResult.status === "fulfilled" ? controlResult.value.Messages ?? [] : [];
-
-      if (telemetryMessages.length === 0 && controlMessages.length === 0) {
-        if (telemetryResult.status === "rejected" && controlResult.status === "rejected") {
-          await sleep(1000);
-        }
+        await sleep(1000);
         continue;
       }
 
-      await Promise.all([
-        Promise.all(
-          telemetryMessages.map(async (message) => {
-            try {
-              await processTelemetryMessage(
-                sqsClient,
-                redisPublisher,
-                pool,
-                config.telemetryQueueUrl,
-                config.redisChannel,
-                message,
-                metrics
-              );
-            } catch (error) {
-              metrics.telemetryFailed += 1;
-              console.error("[worker] failed to process telemetry message", {
-                messageId: message.MessageId ?? null,
-                error
-              });
-            }
-          })
-        ),
-        Promise.all(
-          controlMessages.map(async (message) => {
-            try {
-              await processControlMessage(
-                sqsClient,
-                redisPublisher,
-                pool,
-                config.controlQueueUrl,
-                config.redisChannel,
-                message,
-                metrics
-              );
-            } catch (error) {
-              metrics.controlFailed += 1;
-              console.error("[worker] failed to process control message", {
-                messageId: message.MessageId ?? null,
-                error
-              });
-            }
-          })
-        )
-      ]);
+      const controlMessages = controlResponse.Messages ?? [];
+      if (controlMessages.length === 0) {
+        continue;
+      }
+
+      await Promise.all(
+        controlMessages.map(async (message) => {
+          try {
+            await processControlMessage(
+              sqsClient,
+              redisPublisher,
+              pool,
+              config.controlQueueUrl,
+              config.redisChannel,
+              message,
+              metrics
+            );
+          } catch (error) {
+            metrics.controlFailed += 1;
+            console.error("[worker] failed to process control message", {
+              messageId: message.MessageId ?? null,
+              error
+            });
+          }
+        })
+      );
     }
+  };
+
+  try {
+    await Promise.all([pollTelemetryQueue(), pollControlQueue()]);
   } finally {
     clearInterval(heartbeat);
     await logMetricsSnapshot(sqsClient, queueRefs, metrics).catch((error) => {
