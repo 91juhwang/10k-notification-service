@@ -14,8 +14,8 @@ import {
 } from "./services/control-command-service.js";
 import { ackNotification, listAlerts, listNotifications } from "./services/dashboard-repository.js";
 import { getRedisEventHub } from "./services/redis-event-hub.js";
-import { enqueueControlCommandMessage, enqueueTelemetryMessage } from "./services/sqs-producer.js";
-import { validateTelemetryPayload } from "./services/telemetry-validator.js";
+import { enqueueControlCommandMessage, enqueueTelemetryMessage, enqueueTelemetryMessages } from "./services/sqs-producer.js";
+import { validateTelemetryBatchPayload, validateTelemetryPayload } from "./services/telemetry-validator.js";
 
 type AlertRecord = components["schemas"]["Alert"];
 type AlertStatus = AlertRecord["status"];
@@ -164,6 +164,40 @@ export function createApp(): Express {
       });
     } catch (error) {
       console.error("[api] failed to enqueue telemetry", error);
+      res.status(503).json({ message: "Telemetry queue unavailable" });
+    }
+  });
+
+  app.post("/api/v1/telemetry/batch", requireIngestApiKey, async (req, res) => {
+    const validationResult = validateTelemetryBatchPayload(req.body);
+
+    if (!validationResult.success) {
+      res.status(400).json({
+        message: "Invalid telemetry batch payload",
+        details: validationResult.errors
+      });
+      return;
+    }
+
+    const batchId = randomUUID();
+    const queuedAt = new Date().toISOString();
+    const telemetryMessages = validationResult.data.readings.map((reading, index) => ({
+      ingestId: `${batchId}:${index}`,
+      queuedAt,
+      ...reading
+    }));
+
+    try {
+      await enqueueTelemetryMessages(telemetryMessages);
+
+      res.status(202).json({
+        batchId,
+        status: "accepted",
+        queuedAt,
+        acceptedCount: telemetryMessages.length
+      });
+    } catch (error) {
+      console.error("[api] failed to enqueue telemetry batch", error);
       res.status(503).json({ message: "Telemetry queue unavailable" });
     }
   });
