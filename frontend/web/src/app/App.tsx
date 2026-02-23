@@ -28,6 +28,55 @@ interface ApiErrorBody {
   message?: unknown;
 }
 
+interface CommandActionTemplate {
+  id: string;
+  label: string;
+  description: string;
+  commandType: string;
+  payload: ControlCommandRequest["payload"];
+}
+
+const commandActionTemplates: CommandActionTemplate[] = [
+  {
+    id: "set-mode-eco",
+    label: "Set Mode: Eco",
+    description: "Reduce output to energy-saving mode for lower-demand periods.",
+    commandType: "set_mode",
+    payload: {
+      mode: "eco"
+    }
+  },
+  {
+    id: "set-mode-boost",
+    label: "Set Mode: Boost",
+    description: "Increase output mode to handle peak demand windows.",
+    commandType: "set_mode",
+    payload: {
+      mode: "boost"
+    }
+  },
+  {
+    id: "set-power-limit-80",
+    label: "Set Power Limit: 80 kW",
+    description: "Cap device output at 80 kW for safe operating range.",
+    commandType: "set_power_limit",
+    payload: {
+      maxPowerKw: 80
+    }
+  },
+  {
+    id: "restart-inverter",
+    label: "Restart Inverter",
+    description: "Issue a controlled inverter restart for recovery action.",
+    commandType: "restart_inverter",
+    payload: {
+      reason: "operator_requested_recovery"
+    }
+  }
+];
+
+const defaultCommandActionId = commandActionTemplates[0]?.id ?? "";
+
 function createIdempotencyKey() {
   return `cmd-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
@@ -223,6 +272,10 @@ function isPendingStatus(status: ControlCommandRecord["status"]) {
   return status === "queued" || status === "processing";
 }
 
+function getCommandActionTemplateById(actionId: string) {
+  return commandActionTemplates.find((template) => template.id === actionId) ?? null;
+}
+
 function formatLocalDateTime(iso: string) {
   const parsed = Date.parse(iso);
   if (Number.isNaN(parsed)) {
@@ -255,8 +308,7 @@ export function App() {
   const [refreshingCommandIds, setRefreshingCommandIds] = useState<string[]>([]);
 
   const [commandDeviceId, setCommandDeviceId] = useState("device-001");
-  const [commandType, setCommandType] = useState("set_mode");
-  const [commandPayloadText, setCommandPayloadText] = useState('{"mode":"eco"}');
+  const [selectedCommandActionId, setSelectedCommandActionId] = useState(defaultCommandActionId);
   const [commandIdempotencyKey, setCommandIdempotencyKey] = useState(createIdempotencyKey());
 
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
@@ -266,6 +318,11 @@ export function App() {
 
   const canAckNotifications = session?.role === "admin" || session?.role === "operator";
   const canCreateCommands = session?.role === "admin" || session?.role === "operator";
+
+  const selectedCommandAction = useMemo(
+    () => getCommandActionTemplateById(selectedCommandActionId) ?? commandActionTemplates[0] ?? null,
+    [selectedCommandActionId]
+  );
 
   async function fetchControlCommand(accessToken: string, commandId: string) {
     const response = await requestJson<ControlCommandResponse>(`/api/v1/control/commands/${commandId}`, {
@@ -414,16 +471,8 @@ export function App() {
     setCommandError(null);
     setCommandSuccess(null);
 
-    let payload: ControlCommandRequest["payload"];
-    try {
-      const parsed = JSON.parse(commandPayloadText) as unknown;
-      if (!isObject(parsed)) {
-        throw new Error("Payload JSON must be an object");
-      }
-
-      payload = parsed;
-    } catch (error) {
-      setCommandError(error instanceof Error ? error.message : "Invalid payload JSON");
+    if (!selectedCommandAction) {
+      setCommandError("Select an action template before submitting.");
       return;
     }
 
@@ -438,15 +487,15 @@ export function App() {
         },
         body: JSON.stringify({
           deviceId: commandDeviceId,
-          commandType,
-          payload,
+          commandType: selectedCommandAction.commandType,
+          payload: selectedCommandAction.payload,
           idempotencyKey: commandIdempotencyKey
         } satisfies ControlCommandRequest)
       });
 
       const command = await fetchControlCommand(session.accessToken, createResult.commandId);
       setCommands((current) => upsertControlCommand(current, command));
-      setCommandSuccess(`Command ${createResult.commandId} queued.`);
+      setCommandSuccess(`Command ${createResult.commandId} queued (${selectedCommandAction.label}).`);
       setCommandIdempotencyKey(createIdempotencyKey());
     } catch (error) {
       setCommandError(error instanceof Error ? error.message : "Failed to create control command");
@@ -760,8 +809,17 @@ export function App() {
                   <input value={commandDeviceId} onChange={(event) => setCommandDeviceId(event.target.value)} />
                 </label>
                 <label>
-                  Command Type
-                  <input value={commandType} onChange={(event) => setCommandType(event.target.value)} />
+                  Send Action
+                  <select
+                    value={selectedCommandActionId}
+                    onChange={(event) => setSelectedCommandActionId(event.target.value)}
+                  >
+                    {commandActionTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label>
                   Idempotency Key
@@ -770,14 +828,15 @@ export function App() {
                     onChange={(event) => setCommandIdempotencyKey(event.target.value)}
                   />
                 </label>
-                <label className="wide">
-                  Payload (JSON object)
-                  <textarea
-                    rows={4}
-                    value={commandPayloadText}
-                    onChange={(event) => setCommandPayloadText(event.target.value)}
-                  />
-                </label>
+                <div className="wide template-summary">
+                  <div>
+                    <strong>Command Type:</strong> {selectedCommandAction?.commandType ?? "N/A"}
+                  </div>
+                  <div className="muted">{selectedCommandAction?.description ?? "No action template selected."}</div>
+                  <pre className="payload-preview">
+                    {selectedCommandAction ? JSON.stringify(selectedCommandAction.payload, null, 2) : "{}"}
+                  </pre>
+                </div>
                 <button type="submit" disabled={isSubmittingCommand}>
                   {isSubmittingCommand ? "Submitting..." : "Queue Command"}
                 </button>
